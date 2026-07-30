@@ -426,7 +426,30 @@ function isWhitelisted_(email) {
 /** Returns [{id, title, venue, date}] from 'Activity'
  * Assumes ActivityID was added as the LAST column (I, after Date Given).
  */
+/** Public read caches. Cleared by invalidatePublicCache_() on admin writes. */
+var PUBLIC_CACHE_SECONDS = 900;
+
+function invalidatePublicCache_() {
+  CacheService.getScriptCache().removeAll(['PUBLIC_ACTIVITIES', 'PUBLIC_QUESTIONS']);
+}
+
+/**
+ * CacheService rejects values over 100 KB, so a long Activity sheet would throw
+ * mid-request. Skipping the write only costs a slower read next time.
+ */
+function putPublicCache_(key, value) {
+  var json = JSON.stringify(value);
+  if (json.length > 90000) return;
+  try {
+    CacheService.getScriptCache().put(key, json, PUBLIC_CACHE_SECONDS);
+  } catch (ignored) {}
+}
+
 function getActivityData() {
+  var cache = CacheService.getScriptCache();
+  var hit = cache.get('PUBLIC_ACTIVITIES');
+  if (hit) return JSON.parse(hit);
+
   var ss = SpreadsheetApp.getActiveSpreadsheet();
   var sh = ss.getSheetByName('Activity');
   if (!sh) throw new Error("Sheet 'Activity' not found.");
@@ -471,12 +494,17 @@ function getActivityData() {
     });
   });
 
+  putPublicCache_('PUBLIC_ACTIVITIES', out);
   return out;
 }
 
 // ----------------- Public: load 15 questions for survey --------------
 /** Returns question1..question15 from 'Questions' (row 2) */
 function getQuestions() {
+  var cache = CacheService.getScriptCache();
+  var hit = cache.get('PUBLIC_QUESTIONS');
+  if (hit) return JSON.parse(hit);
+
   var ss = SpreadsheetApp.getActiveSpreadsheet();
   var sh = ss.getSheetByName('Questions');
   if (!sh) throw new Error("Sheet 'Questions' not found.");
@@ -501,6 +529,7 @@ function getQuestions() {
     var idx = idxOf_(hdrMap, candidatesFor(j));
     out[key] = safeTrim_(idx >= 0 ? (row[idx] || '') : '');
   }
+  putPublicCache_('PUBLIC_QUESTIONS', out);
   return out;
 }
 
@@ -1207,6 +1236,7 @@ function adminSaveActivity(payload, adminToken) {
     // INSERT new row
     sh.appendRow(rowValues);
   }
+  invalidatePublicCache_();
   return 'OK';
 }
 
@@ -1223,6 +1253,7 @@ function adminDeleteActivity(id, adminToken) {
   var lastRow = sh.getLastRow();
   if (rowId > lastRow) throw new Error('Row does not exist.');
   sh.deleteRow(rowId);
+  invalidatePublicCache_();
   return 'OK';
 }
 
@@ -1487,6 +1518,7 @@ function adminSaveQuestions(questions, adminToken) {
   var sh = ensureQuestionsSheet_(), lock = LockService.getScriptLock();
   if (!lock.tryLock(10000)) throw new Error('Question management is busy. Please try again.');
   try { sh.getRange(2,1,1,15).setValues([questions.map(safeSheetValue_)]); } finally { lock.releaseLock(); }
+  invalidatePublicCache_();
   return questions;
 }
 

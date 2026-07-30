@@ -11,12 +11,12 @@
   to = "/index.html"
   status = 200
 
-[[headers]]
-  for = "/*"
-  [headers.values]
-    Content-Security-Policy = "default-src 'self'; script-src 'self' https://challenges.cloudflare.com; style-src 'self' https://fonts.googleapis.com; font-src 'self' https://fonts.gstatic.com; img-src 'self' data: blob: https://ik.imagekit.io; connect-src 'self' https://challenges.cloudflare.com; frame-src https://challenges.cloudflare.com; frame-ancestors 'none'; base-uri 'self'; form-action 'self'; object-src 'none'; upgrade-insecure-requests"
-    Referrer-Policy = "strict-origin-when-cross-origin"
-    X-Content-Type-Options = "nosniff"
-    X-Frame-Options = "DENY"
-    Permissions-Policy = "camera=(), microphone=(), geolocation=(), payment=(), usb=()"
-    Strict-Transport-Security = "max-age=31536000; includeSubDomains"
+# Security headers are NOT declared here. They live in config/_headers and are
+# copied to dist/_headers by `npm run build` (scripts/headers.mjs).
+#
+# `netlify dev` applies headers from a [[headers]] block here, from public/,
+# AND from dist/ — so none of those can separate dev from production. The CSP's
+# script-src blocks Vite's inline React Refresh preamble, which makes every
+# React module throw "can't detect preamble" and renders a blank page with no
+# console error. Start local work with `npm run dev:netlify`, which clears
+# dist/_headers first.
