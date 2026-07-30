@@ -270,6 +270,17 @@ export async function saveAdminQuestions(questions) {
   if (!DEMO_MODE) requireBackend();
   return questions;
 }
+export async function getAdminAuditLog(filters = {}) {
+  if (window.google?.script)
+    return gasRun("adminGetAuditLog", filters, adminToken());
+  if (HAS_REMOTE)
+    return remote("adminGetAuditLog", {
+      filters,
+      adminToken: adminToken(),
+    });
+  if (!DEMO_MODE) requireBackend();
+  return { entries: [], total: 0, integrity: { valid: true, checkedRows: 0 } };
+}
 export async function verifyCertificate(code) {
   if (window.google?.script) return gasRun("verifyCertificate", code);
   if (HAS_REMOTE) return remote("verifyCertificate", { code });

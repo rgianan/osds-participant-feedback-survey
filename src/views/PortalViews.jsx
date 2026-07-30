@@ -5,6 +5,7 @@ import {
   BadgeCheck,
   Check,
   ChevronDown,
+  ClipboardList,
   Download,
   ExternalLink,
   FileCheck2,
@@ -27,6 +28,7 @@ import {
   deleteActivity,
   getActivities,
   getAdminActivities,
+  getAdminAuditLog,
   getAdminQuestions,
   getAdminUsers,
   getFeedbackAnalytics,
@@ -795,8 +797,11 @@ export function AdminDashboard() {
     }
   }
   async function signOut() {
-    await adminLogout();
-    setSession(null);
+    try {
+      await adminLogout();
+    } finally {
+      setSession(null);
+    }
   }
   if (!session) return <AdminLogin onAuthenticated={setSession} />;
   const isSuperadmin = session.user?.role?.toLowerCase() === "superadmin";
@@ -814,6 +819,7 @@ export function AdminDashboard() {
       "Survey questions",
       "Edit the 15 participant rating questions.",
     ],
+    audit: ["Audit log", "Review administrator access and privileged changes."],
   }[tab] || ["Activities", "Manage the certificate portal."];
   return (
     <div className="admin-layout">
@@ -850,6 +856,15 @@ export function AdminDashboard() {
               title="Edit participant survey questions"
             >
               <ListChecks /> Questions
+            </button>
+          )}
+          {isSuperadmin && (
+            <button
+              className={tab === "audit" ? "active" : ""}
+              onClick={() => setTab("audit")}
+              title="Review the protected administrator audit trail"
+            >
+              <ClipboardList /> Audit
             </button>
           )}
           <a href="/" title="Open the participant feedback portal">
@@ -911,6 +926,8 @@ export function AdminDashboard() {
           <UsersPanel />
         ) : tab === "questions" && isSuperadmin ? (
           <QuestionsPanel />
+        ) : tab === "audit" && isSuperadmin ? (
+          <AuditPanel />
         ) : (
           <>
             <section className="stats">
@@ -1275,6 +1292,195 @@ function QuestionsPanel() {
         ))}
       </div>
     </form>
+  );
+}
+
+function AuditPanel() {
+  const [data, setData] = useState(null),
+    [filters, setFilters] = useState({
+      action: "",
+      outcome: "",
+      query: "",
+      limit: 200,
+    }),
+    [loading, setLoading] = useState(true),
+    [error, setError] = useState("");
+  const loadAudit = async (nextFilters = filters) => {
+    setLoading(true);
+    setError("");
+    try {
+      setData(await getAdminAuditLog(nextFilters));
+    } catch (loadError) {
+      setError(loadError.message || "Unable to load the audit log.");
+    } finally {
+      setLoading(false);
+    }
+  };
+  useEffect(() => {
+    loadAudit();
+  }, []);
+  const updateFilter = (key, value) => {
+    const next = { ...filters, [key]: value };
+    setFilters(next);
+    if (key !== "query") loadAudit(next);
+  };
+  const entries = data?.entries || [],
+    failures = entries.filter((entry) => entry.outcome === "FAILURE").length,
+    logins = entries.filter(
+      (entry) => entry.action === "LOGIN" && entry.outcome === "SUCCESS",
+    ).length;
+  return (
+    <section className="audit-module">
+      <section className="stats audit-stats">
+        <article>
+          <span>Visible events</span>
+          <strong>{entries.length}</strong>
+          <i className="green">
+            <ClipboardList />
+          </i>
+        </article>
+        <article>
+          <span>Successful logins</span>
+          <strong>{logins}</strong>
+          <i className="blue">
+            <ShieldCheck />
+          </i>
+        </article>
+        <article>
+          <span>Failed actions</span>
+          <strong>{failures}</strong>
+          <i className="gold">
+            <X />
+          </i>
+        </article>
+      </section>
+      <section className="table-card">
+        <div className="audit-toolbar">
+          <div>
+            <h2>Administrator audit trail</h2>
+            <p>
+              {data?.total || 0} matching records · chain integrity{" "}
+              <b
+                className={
+                  data?.integrity?.valid ? "integrity-good" : "integrity-bad"
+                }
+              >
+                {data?.integrity?.valid ? "verified" : "warning"}
+              </b>
+            </p>
+          </div>
+          <div className="audit-filters">
+            <select
+              value={filters.action}
+              onChange={(event) => updateFilter("action", event.target.value)}
+              title="Filter by audited action"
+            >
+              <option value="">All actions</option>
+              <option value="LOGIN">Login</option>
+              <option value="LOGOUT">Logout</option>
+              <option value="ACTIVITY_SAVE">Activity save</option>
+              <option value="ACTIVITY_DELETE">Activity delete</option>
+              <option value="SIGNATURE_UPLOAD">Signature upload</option>
+              <option value="USER_SAVE">User save</option>
+              <option value="QUESTIONS_SAVE">Questions save</option>
+            </select>
+            <select
+              value={filters.outcome}
+              onChange={(event) => updateFilter("outcome", event.target.value)}
+              title="Filter by outcome"
+            >
+              <option value="">All outcomes</option>
+              <option value="SUCCESS">Success</option>
+              <option value="FAILURE">Failure</option>
+            </select>
+            <form
+              onSubmit={(event) => {
+                event.preventDefault();
+                loadAudit();
+              }}
+              className="audit-search"
+            >
+              <input
+                value={filters.query}
+                onChange={(event) =>
+                  setFilters({ ...filters, query: event.target.value })
+                }
+                placeholder="Actor, target, request ID…"
+                aria-label="Search audit records"
+              />
+              <button className="mini-button" title="Apply audit search">
+                Search
+              </button>
+            </form>
+            <button
+              className="mini-button"
+              onClick={() => loadAudit()}
+              disabled={loading}
+              title="Refresh audit records"
+            >
+              {loading ? "Loading…" : "Refresh"}
+            </button>
+          </div>
+        </div>
+        {error && <div className="alert admin-alert">{error}</div>}
+        {data?.integrity && !data.integrity.valid && (
+          <div className="audit-integrity-warning">
+            <ShieldCheck /> The audit hash chain does not match. A row may have
+            been edited or deleted directly in Google Sheets.
+          </div>
+        )}
+        <div className="table-scroll">
+          <table className="audit-table">
+            <thead>
+              <tr>
+                <th>Timestamp</th>
+                <th>Actor</th>
+                <th>Action</th>
+                <th>Target</th>
+                <th>Outcome</th>
+                <th>Details</th>
+                <th>Request ID</th>
+              </tr>
+            </thead>
+            <tbody>
+              {entries.map((entry) => (
+                <tr key={entry.audit_id}>
+                  <td>{entry.timestamp}</td>
+                  <td>
+                    <strong>{entry.actor_email || "Unknown"}</strong>
+                    <small>{entry.actor_role || "—"}</small>
+                  </td>
+                  <td>{entry.action}</td>
+                  <td>
+                    <strong>{entry.target_type}</strong>
+                    <small>{entry.target_id || "—"}</small>
+                  </td>
+                  <td>
+                    <span
+                      className={`status-pill ${entry.outcome === "SUCCESS" ? "enabled" : "disabled"}`}
+                    >
+                      {entry.outcome}
+                    </span>
+                  </td>
+                  <td className="audit-details">
+                    {entry.details?.operation ||
+                      entry.details?.role ||
+                      entry.details?.error ||
+                      "—"}
+                  </td>
+                  <td className="audit-request">{entry.request_id || "—"}</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+          {!loading && !entries.length && (
+            <div className="empty-audit">
+              No audit records match the current filters.
+            </div>
+          )}
+        </div>
+      </section>
+    </section>
   );
 }
 

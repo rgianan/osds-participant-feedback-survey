@@ -5,11 +5,13 @@ const json = (statusCode, payload) => ({
   headers: {
     "content-type": "application/json; charset=utf-8",
     "cache-control": "no-store",
+    "x-content-type-options": "nosniff",
+    "referrer-policy": "no-referrer",
   },
   body: JSON.stringify(payload),
 });
 
-export const handler = async (event) => {
+export const handler = async (event, context = {}) => {
   if (event.httpMethod !== "POST")
     return json(405, { ok: false, error: "Method not allowed." });
 
@@ -102,6 +104,11 @@ export const handler = async (event) => {
     }
     payload.proxyToken = sharedToken;
     payload.portalBaseUrl = portalBaseUrl;
+    payload.requestContext = {
+      requestId: String(
+        context.awsRequestId || event.headers?.["x-nf-request-id"] || "",
+      ).slice(0, 100),
+    };
     const upstream = await fetch(gasUrl, {
       method: "POST",
       headers: { "content-type": "text/plain;charset=utf-8" },
@@ -122,6 +129,8 @@ export const handler = async (event) => {
       headers: {
         "content-type": "application/json; charset=utf-8",
         "cache-control": "no-store",
+        "x-content-type-options": "nosniff",
+        "referrer-policy": "no-referrer",
       },
       body: responseText,
     };

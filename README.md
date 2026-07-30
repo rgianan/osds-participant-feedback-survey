@@ -56,7 +56,7 @@ Do not set `VITE_ENABLE_DEMO_MODE` in Netlify. Demo mode is restricted to the lo
 
 Admin access uses email and password credentials stored as salted password hashes in a `Users` sheet. Edit the host account inside `seedUsers()` in `Code.gs`, replace its email and `CHANGE_THIS_PASSWORD`, then run the function once from the Apps Script editor. The seeded host has the `superadmin` role.
 
-The superadmin can add and edit accounts in the admin **Users** page. Account metadata is synchronized to the `Whitelist` sheet using these headers: `user_id`, `name`, `role`, `email`, `active`, `created_at`, and `updated_at`. Password hashes and salts remain only in `Users`; passwords are never stored in `Whitelist`. The **Questions** page reads and updates `question1` through `question15` in row 2 of the `Questions` sheet. Both modules are enforced as superadmin-only by the Apps Script backend.
+The superadmin can add and edit accounts in the admin **Users** page. Account metadata is synchronized to the `Whitelist` sheet using these headers: `user_id`, `name`, `role`, `email`, `active`, `created_at`, and `updated_at`. Password hashes and salts remain only in `Users`; passwords are never stored in `Whitelist`. The **Questions** page reads and updates `question1` through `question15` in row 2 of the `Questions` sheet. The superadmin-only **Audit** page records logins, logouts, activity changes, signature uploads, user changes, and question changes. Audit rows form an HMAC hash chain so direct sheet edits, broken links, and deletion of the latest entry are reported by the interface. Passwords, session tokens, shared tokens, Turnstile tokens, and participant answers are never included.
 
 Create a Cloudflare Turnstile widget for the production portal hostname. Put its public site key in `VITE_TURNSTILE_SITE_KEY` and its secret key in `TURNSTILE_SECRET_KEY`. Participant submissions and admin logins are rejected by the Netlify proxy unless Cloudflare validates a fresh, single-use token for the expected action and hostname.
 
@@ -66,7 +66,7 @@ Production protections include expiring admin sessions, login throttling, upload
 
 Deploy `google-apps-script/Code.gs` as a web app and use its `/exec` URL in Netlify. Confirm the template and certificate folder IDs near the top of the script and authorize its Sheets, Drive, Slides, email, and user-information permissions.
 
-For a new spreadsheet, run `setupParticipantFeedbackSheets()` once from the Apps Script editor. It creates the `Activity`, `Responses`, `Questions`, `Whitelist`, and `Users` sheets, adds any missing headers without deleting existing records, formats the header rows, and inserts the initial 15 editable survey questions. The function is safe to run again after future updates.
+For a new spreadsheet, run `setupParticipantFeedbackSheets()` once from the Apps Script editor. It creates the `Activity`, `Responses`, `Questions`, `Whitelist`, `Users`, and `Audit` sheets, adds any missing headers without deleting existing records, formats the header rows, and inserts the initial 15 editable survey questions. The function is safe to run again after future updates.
 
 Run the setup function again after enabling certificate verification. It adds `Verification Code` and `Verification URL` to `Responses` without changing existing records. New submissions receive verification codes automatically; reprocessing an older response assigns it a code.
 

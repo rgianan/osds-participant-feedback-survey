@@ -53,15 +53,19 @@ function doGet(e) {
 
 /** JSON endpoint used by the Netlify frontend. */
 function doPost(e) {
+  var body = null, action = '', auditActor = null, requestContext = {};
   try {
     var raw = (e && e.postData && e.postData.contents) || '{}';
     if (raw.length > 6000000) throw new Error('Request payload is too large.');
-    var body = JSON.parse(raw);
+    body = JSON.parse(raw);
     assertSubmitSharedToken_(body.proxyToken);
     delete body.proxyToken;
     rememberPortalBaseUrl_(body.portalBaseUrl);
     delete body.portalBaseUrl;
-    var action = safeTrim_(body.action);
+    requestContext = body.requestContext || {};
+    delete body.requestContext;
+    action = safeTrim_(body.action);
+    auditActor = auditActorForRequest_(action, body);
     var data;
 
     if (action === 'getActivityData') data = getActivityData();
@@ -79,11 +83,15 @@ function doPost(e) {
     else if (action === 'adminSaveUser') data = adminSaveUser(body.payload || {}, body.adminToken);
     else if (action === 'adminGetQuestions') data = adminGetQuestions(body.adminToken);
     else if (action === 'adminSaveQuestions') data = adminSaveQuestions(body.questions || (body.payload && body.payload.questions) || [], body.adminToken);
+    else if (action === 'adminGetAuditLog') data = adminGetAuditLog(body.filters || {}, body.adminToken);
     else if (action === 'verifyCertificate') data = verifyCertificate(body.code);
     else throw new Error('Unknown action: ' + action);
 
+    if (isAuditedAction_(action)) { try { appendAuditForRequest_(action, body, true, '', auditActorForResult_(action, data, auditActor), requestContext); } catch (auditError) { console.error('Audit write failed: '+String(auditError&&auditError.message||auditError)); } }
+
     return jsonResponse_({ ok: true, data: data });
   } catch (error) {
+    try { if (body && isAuditedAction_(action)) appendAuditForRequest_(action, body, false, error && error.message ? error.message : String(error), auditActor, requestContext); } catch (_) {}
     return jsonResponse_({ ok: false, error: error && error.message ? error.message : String(error) });
   }
 }
@@ -103,6 +111,7 @@ function getWebAppUrl() {
 
 // ------------------------------ Utilities ---------------------------
 function safeTrim_(v){ return String(v == null ? '' : v).trim(); }
+function safeSheetValue_(v){return typeof v==='string'&&/^[=+\-@]/.test(v)?("'"+v):v;}
 function escapeHtml_(v){return safeTrim_(v).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;').replace(/'/g,'&#39;');}
 function getViewerEmail_(){ return safeTrim_(Session.getActiveUser().getEmail() || ''); }
 
@@ -182,6 +191,7 @@ function setupParticipantFeedbackSecurity() {
   properties.setProperties({
     SUBMIT_SHARED_TOKEN_HASH: sha256Base64_(sharedToken),
     SESSION_HASH_SECRET: sessionSecret,
+    AUDIT_HASH_SECRET: existing.AUDIT_HASH_SECRET || randomSecret_(),
     SECURITY_SECRETS_UPDATED_AT: new Date().toISOString()
   }, false);
   return {
@@ -225,6 +235,8 @@ function setupParticipantFeedbackSheets() {
   if (!lock.tryLock(30000)) throw new Error('Sheet setup is already running. Please try again.');
   try {
     var ss = SpreadsheetApp.getActiveSpreadsheet();
+    var setupProperties=PropertiesService.getScriptProperties();
+    if(!setupProperties.getProperty('AUDIT_HASH_SECRET'))setupProperties.setProperty('AUDIT_HASH_SECRET',randomSecret_());
     var activity = ensureSetupSheet_(ss, 'Activity', [
       setupColumn_('Title', ['activity title','activity']),
       setupColumn_('Venue', ['location']),
@@ -284,11 +296,17 @@ function setupParticipantFeedbackSheets() {
       setupColumn_('Email'), setupColumn_('PasswordHash', ['password hash']), setupColumn_('Salt'),
       setupColumn_('Name', ['display name']), setupColumn_('Role'), setupColumn_('Active'), setupColumn_('CreatedAt', ['created at'])
     ]);
+    var audit = ensureSetupSheet_(ss, 'Audit', [
+      setupColumn_('timestamp'),setupColumn_('audit_id'),setupColumn_('actor_email'),setupColumn_('actor_role'),
+      setupColumn_('action'),setupColumn_('target_type'),setupColumn_('target_id'),setupColumn_('outcome'),
+      setupColumn_('details'),setupColumn_('request_id'),setupColumn_('previous_hash'),setupColumn_('entry_hash')
+    ]);
+    audit.sheet.getRange('A:A').setNumberFormat('@');
 
     return {
       status: 'OK',
       spreadsheetUrl: ss.getUrl(),
-      sheets: [activity, responses, questions, whitelist, users].map(function(result){
+      sheets: [activity, responses, questions, whitelist, users, audit].map(function(result){
         return {name:result.sheet.getName(),created:result.created,headersAdded:result.headersAdded,seeded:!!result.seeded};
       }),
       nextStep: 'Run setupParticipantFeedbackSecurity(), copy its submit token to Netlify, then run seedUsers() and setupCertificateQueueTrigger().'
@@ -316,6 +334,70 @@ function ensureSetupSheet_(ss, sheetName, columns) {
     sh.autoResizeColumns(1,sh.getLastColumn());
   }
   return {sheet:sh,created:created,headersAdded:added};
+}
+
+// --------------------------- Tamper-evident audit log ---------------------------
+function isAuditedAction_(action) { return ['adminLogin','adminLogout','adminSaveActivity','adminDeleteActivity','adminUploadSignature','adminSaveUser','adminSaveQuestions'].indexOf(action)>=0; }
+
+function auditActorForRequest_(action, body) {
+  if(action==='adminLogin')return {email:safeTrim_(body.email).toLowerCase(),role:''};
+  var session=getAdminSession_(body.adminToken);
+  return session?{email:session.email,role:session.role}:{email:'',role:''};
+}
+
+function auditActorForResult_(action, data, fallback) {
+  if(action==='adminLogin'&&data&&data.user)return {email:safeTrim_(data.user.email).toLowerCase(),role:safeTrim_(data.user.role).toLowerCase()};
+  return fallback||{email:'',role:''};
+}
+
+function auditTargetForRequest_(action, body) {
+  var payload=body.payload||{};
+  if(action==='adminLogin'||action==='adminLogout')return {type:'session',id:safeTrim_(body.email||(auditActorForRequest_(action,body)||{}).email)};
+  if(action==='adminSaveActivity')return {type:'activity',id:safeTrim_(payload.activityId||payload.id||payload.title),details:{operation:payload.id?'update':'create',title:safeTrim_(payload.title).slice(0,160)}};
+  if(action==='adminDeleteActivity')return {type:'activity',id:safeTrim_(body.id||(body.payload&&body.payload.id))};
+  if(action==='adminUploadSignature')return {type:'signature',id:safeTrim_(payload.filename).slice(0,180)};
+  if(action==='adminSaveUser')return {type:'user',id:safeTrim_(payload.user_id||payload.email).toLowerCase(),details:{role:safeTrim_(payload.role).toLowerCase(),active:payload.active!==false}};
+  if(action==='adminSaveQuestions')return {type:'survey',id:'Questions',details:{questionCount:(body.questions||(body.payload&&body.payload.questions)||[]).length}};
+  return {type:'system',id:''};
+}
+
+function auditActionLabel_(action) { return {adminLogin:'LOGIN',adminLogout:'LOGOUT',adminSaveActivity:'ACTIVITY_SAVE',adminDeleteActivity:'ACTIVITY_DELETE',adminUploadSignature:'SIGNATURE_UPLOAD',adminSaveUser:'USER_SAVE',adminSaveQuestions:'QUESTIONS_SAVE'}[action]||safeTrim_(action).toUpperCase(); }
+
+function ensureAuditSheet_() {
+  var ss=SpreadsheetApp.getActiveSpreadsheet(),sh=ss.getSheetByName('Audit');
+  if(sh)return sh;
+  return ensureSetupSheet_(ss,'Audit',[
+    setupColumn_('timestamp'),setupColumn_('audit_id'),setupColumn_('actor_email'),setupColumn_('actor_role'),setupColumn_('action'),setupColumn_('target_type'),setupColumn_('target_id'),setupColumn_('outcome'),setupColumn_('details'),setupColumn_('request_id'),setupColumn_('previous_hash'),setupColumn_('entry_hash')
+  ]).sheet;
+}
+
+function auditCanonical_(entry) { return [entry.timestamp,entry.audit_id,entry.actor_email,entry.actor_role,entry.action,entry.target_type,entry.target_id,entry.outcome,entry.details,entry.request_id,entry.previous_hash].map(safeTrim_).join('|'); }
+
+function appendAuditForRequest_(action, body, success, errorMessage, actor, requestContext) {
+  var secret=PropertiesService.getScriptProperties().getProperty('AUDIT_HASH_SECRET');
+  if(!secret)return;
+  var lock=LockService.getScriptLock();if(!lock.tryLock(5000))return;
+  try{
+    var sh=ensureAuditSheet_(),hdr=getHeaderMap_(sh),target=auditTargetForRequest_(action,body),lastRow=sh.getLastRow();
+    var cHash=idxOf_(hdr,['entry_hash']),previous=lastRow>=2&&cHash>=0?safeTrim_(sh.getRange(lastRow,cHash+1).getValue()):'';
+    var entry={timestamp:Utilities.formatDate(new Date(),Session.getScriptTimeZone()||'Asia/Manila','yyyy-MM-dd HH:mm:ss'),audit_id:'AUD-'+Utilities.getUuid().replace(/-/g,'').slice(0,16).toUpperCase(),actor_email:safeTrim_((actor||{}).email).toLowerCase(),actor_role:safeTrim_((actor||{}).role).toLowerCase(),action:auditActionLabel_(action),target_type:target.type,target_id:target.id,outcome:success?'SUCCESS':'FAILURE',details:JSON.stringify(success?(target.details||{}):{error:safeTrim_(errorMessage).slice(0,300)}),request_id:safeTrim_((requestContext||{}).requestId).slice(0,100),previous_hash:previous};
+    entry.entry_hash=hmac256Base64_(auditCanonical_(entry),secret);
+    var row=new Array(sh.getLastColumn()).fill('');Object.keys(entry).forEach(function(key){if(key in hdr)row[hdr[key]]=safeSheetValue_(entry[key]);});
+    sh.appendRow(row);
+    PropertiesService.getScriptProperties().setProperty('AUDIT_HEAD_HASH',entry.entry_hash);
+  }finally{lock.releaseLock();}
+}
+
+function adminGetAuditLog(filters, adminToken) {
+  requireSuperadmin_(adminToken);filters=filters||{};
+  var sh=ensureAuditSheet_(),expectedHead=PropertiesService.getScriptProperties().getProperty('AUDIT_HEAD_HASH')||'';if(sh.getLastRow()<2)return {entries:[],integrity:{valid:!expectedHead,checkedRows:0}};
+  var hdr=getHeaderMap_(sh),rows=sh.getRange(2,1,sh.getLastRow()-1,sh.getLastColumn()).getDisplayValues(),secret=PropertiesService.getScriptProperties().getProperty('AUDIT_HASH_SECRET')||'',integrity=true,previousShown=null;
+  var entries=rows.map(function(row){function cell(name){return name in hdr?safeTrim_(row[hdr[name]]):'';}return{timestamp:cell('timestamp'),audit_id:cell('audit_id'),actor_email:cell('actor_email'),actor_role:cell('actor_role'),action:cell('action'),target_type:cell('target_type'),target_id:cell('target_id'),outcome:cell('outcome'),details:cell('details'),request_id:cell('request_id'),previous_hash:cell('previous_hash'),entry_hash:cell('entry_hash')};});
+  entries.forEach(function(entry){if(!secret||!constantTimeEquals_(hmac256Base64_(auditCanonical_(entry),secret),entry.entry_hash)||(previousShown!==null&&entry.previous_hash!==previousShown))integrity=false;previousShown=entry.entry_hash;});if(expectedHead&&previousShown!==expectedHead)integrity=false;
+  var action=safeTrim_(filters.action).toUpperCase(),outcome=safeTrim_(filters.outcome).toUpperCase(),query=safeTrim_(filters.query).toLowerCase();
+  var filtered=entries.filter(function(entry){return(!action||entry.action===action)&&(!outcome||entry.outcome===outcome)&&(!query||[entry.actor_email,entry.target_id,entry.action,entry.details,entry.request_id].join(' ').toLowerCase().indexOf(query)>=0);});
+  var limit=Math.min(500,Math.max(25,Number(filters.limit)||200));
+  return {entries:filtered.slice(-limit).reverse().map(function(entry){delete entry.previous_hash;delete entry.entry_hash;try{entry.details=JSON.parse(entry.details||'{}');}catch(_){entry.details={};}return entry;}),integrity:{valid:integrity,checkedRows:entries.length},total:filtered.length};
 }
 
 // --- Whitelist helper ---
@@ -604,7 +686,7 @@ function submitFeedback(formData) {
 
     function setCol_(names, value){
       var c = idxOf_(hdrMap, names);
-      if (c >= 0) rowArr[c] = value;
+      if (c >= 0) rowArr[c] = safeSheetValue_(value);
     }
 
     // Set known columns (if present)
@@ -1112,7 +1194,7 @@ function adminSaveActivity(payload, adminToken) {
   requiredHeaders.forEach(function(header){ if(idxOf_(hdr,[header])<0){sh.getRange(1,sh.getLastColumn()+1).setValue(header);hdr=getHeaderMap_(sh);} });
   var lastCol=sh.getLastColumn(), rowValues=new Array(lastCol).fill('');
   if (isFinite(rowId) && rowId >= 2 && rowId <= sh.getLastRow()) rowValues=sh.getRange(rowId,1,1,lastCol).getValues()[0];
-  function put(names,value){var col=idxOf_(hdr,names);if(col>=0)rowValues[col]=value;}
+  function put(names,value){var col=idxOf_(hdr,names);if(col>=0)rowValues[col]=safeSheetValue_(value);}
   put(['title','activity title','activity'],title); put(['venue','location'],venue); put(['fromdate','from date','start'],fromDate); put(['todate','to date','end'],toDate);
   put(['certificate template','template'],template); put(['focal-in-charge','focal in charge','in-charge','in charge'],inCharge); put(['timestamp','created at','last updated'],new Date());
   put(['given date','date given','givendate','issued','schedule'],givenDate); put(['activityid','activity id','id'],activityId); put(['region','ched region'],region);
@@ -1224,7 +1306,6 @@ function adminUploadTemplate(fileObj) {
   var blob = Utilities.newBlob(bytes, fileObj.mimeType || 'application/vnd.ms-powerpoint', fileObj.filename);
 
   var file = folder.createFile(blob);
-  try { file.setSharing(DriveApp.Access.ANYONE_WITH_LINK, DriveApp.Permission.VIEW); } catch (_){}
 
   return { id: file.getId(), name: file.getName(), url: file.getUrl() };
 }
@@ -1268,7 +1349,6 @@ function adminUploadSignature(fileObj, adminToken) {
   var folder = assertFolder_(TEMPLATE_FOLDER_ID, 'Template folder');
   var blob = Utilities.newBlob(Utilities.base64Decode(fileObj.base64), fileObj.mimeType, fileObj.filename);
   var file = folder.createFile(blob);
-  try { file.setSharing(DriveApp.Access.ANYONE_WITH_LINK, DriveApp.Permission.VIEW); } catch (_) {}
   return {id:file.getId(),name:file.getName(),url:file.getUrl()};
 }
 
@@ -1352,7 +1432,7 @@ function upsertWhitelistUser_(user) {
     updated_at: now
   };
   if (!row) row = Math.max(2, sh.getLastRow() + 1);
-  Object.keys(values).forEach(function(key){sh.getRange(row, hdr[key] + 1).setValue(values[key]);});
+  Object.keys(values).forEach(function(key){sh.getRange(row, hdr[key] + 1).setValue(safeSheetValue_(values[key]));});
   return values;
 }
 
@@ -1360,7 +1440,7 @@ function syncCredentialMetadata_(user) {
   var sh = SpreadsheetApp.getActiveSpreadsheet().getSheetByName('Users'), row = sh ? findRowByEmail_(sh, user.email) : 0;
   if (!sh || !row) throw new Error('A password is required when creating a new user.');
   var hdr = getHeaderMap_(sh), updates = {name:user.name, role:user.role, active:user.active};
-  Object.keys(updates).forEach(function(key){var col=idxOf_(hdr,[key]);if(col>=0)sh.getRange(row,col+1).setValue(updates[key]);});
+  Object.keys(updates).forEach(function(key){var col=idxOf_(hdr,[key]);if(col>=0)sh.getRange(row,col+1).setValue(safeSheetValue_(updates[key]));});
 }
 
 function adminGetUsers(adminToken) {
@@ -1406,7 +1486,7 @@ function adminSaveQuestions(questions, adminToken) {
   if (questions.some(function(question){return !question;})) throw new Error('Questions cannot be blank.');
   var sh = ensureQuestionsSheet_(), lock = LockService.getScriptLock();
   if (!lock.tryLock(10000)) throw new Error('Question management is busy. Please try again.');
-  try { sh.getRange(2,1,1,15).setValues([questions]); } finally { lock.releaseLock(); }
+  try { sh.getRange(2,1,1,15).setValues([questions.map(safeSheetValue_)]); } finally { lock.releaseLock(); }
   return questions;
 }
 
@@ -1438,7 +1518,7 @@ function seedUser(email, password, displayName, role, active) {
   ]),sh=setup.sheet,hdr=getHeaderMap_(sh),row=findRowByEmail_(sh,email);
   var salt=Utilities.getUuid()+Utilities.getUuid(),hash=hashAdminPassword_(password,salt),lastCol=sh.getLastColumn();
   var values=row?sh.getRange(row,1,1,lastCol).getValues()[0]:new Array(lastCol).fill('');
-  function put(names,value){var col=idxOf_(hdr,names);if(col>=0)values[col]=value;}
+  function put(names,value){var col=idxOf_(hdr,names);if(col>=0)values[col]=safeSheetValue_(value);}
   put(['email'],email);put(['passwordhash','password hash'],hash);put(['salt'],salt);put(['name','display name'],displayName||email);
   put(['role'],role);put(['active'],active);if(!row)put(['createdat','created at'],new Date());
   if(row)sh.getRange(row,1,1,lastCol).setValues([values]);else sh.appendRow(values);
