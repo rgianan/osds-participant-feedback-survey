@@ -97,7 +97,18 @@ async function remote(action, payload = {}, attempt = 0) {
       headers: { "Content-Type": "text/plain;charset=utf-8" },
       body: JSON.stringify({ action, ...payload }),
     });
-    const data = await response.json();
+    const responseText = await response.text();
+    let data;
+    try {
+      data = JSON.parse(responseText);
+    } catch {
+      const receivedHtml = /^\s*</.test(responseText);
+      throw new Error(
+        receivedHtml
+          ? "The backend returned a webpage instead of API data. Redeploy the current Netlify source and confirm GAS_WEB_APP_URL uses the Apps Script /exec URL."
+          : "The backend returned an invalid response. Check the Netlify gas-proxy function logs.",
+      );
+    }
     if (!response.ok || data.ok === false)
       throw new Error(data.error || "Request failed");
     return data.data ?? data;
