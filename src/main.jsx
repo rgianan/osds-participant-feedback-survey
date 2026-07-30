@@ -6,6 +6,7 @@ import "./analytics.css";
 import "./auth.css";
 import "./production.css";
 import "./superadmin.css";
+import "./verification.css";
 createRoot(document.getElementById("root")).render(
   <React.StrictMode>
     <App />

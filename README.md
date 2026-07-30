@@ -43,6 +43,9 @@ In **Site configuration → Environment variables**, add:
 ```text
 GAS_WEB_APP_URL=https://script.google.com/macros/s/YOUR_DEPLOYMENT_ID/exec
 SUBMIT_SHARED_TOKEN=TOKEN_RETURNED_BY_SETUP_FUNCTION
+TURNSTILE_SECRET_KEY=YOUR_CLOUDFLARE_TURNSTILE_SECRET_KEY
+VITE_TURNSTILE_SITE_KEY=YOUR_CLOUDFLARE_TURNSTILE_SITE_KEY
+PORTAL_BASE_URL=https://YOUR-PRODUCTION-DOMAIN
 ```
 
 The frontend uses a same-origin Netlify function to forward requests to Apps Script, avoiding browser cross-origin failures. Trigger a new deployment after changing the variable. A manual `dist/` upload does not include the server function and cannot connect to the production backend.
@@ -55,6 +58,8 @@ Admin access uses email and password credentials stored as salted password hashe
 
 The superadmin can add and edit accounts in the admin **Users** page. Account metadata is synchronized to the `Whitelist` sheet using these headers: `user_id`, `name`, `role`, `email`, `active`, `created_at`, and `updated_at`. Password hashes and salts remain only in `Users`; passwords are never stored in `Whitelist`. The **Questions** page reads and updates `question1` through `question15` in row 2 of the `Questions` sheet. Both modules are enforced as superadmin-only by the Apps Script backend.
 
+Create a Cloudflare Turnstile widget for the production portal hostname. Put its public site key in `VITE_TURNSTILE_SITE_KEY` and its secret key in `TURNSTILE_SECRET_KEY`. Participant submissions and admin logins are rejected by the Netlify proxy unless Cloudflare validates a fresh, single-use token for the expected action and hostname.
+
 Production protections include expiring admin sessions, login throttling, upload-size and MIME validation, request-size limits, a participant-form honeypot, escaped certificate-email HTML, pinned package versions, and Netlify CSP/HSTS/security headers.
 
 ## Google Apps Script backend
@@ -62,6 +67,10 @@ Production protections include expiring admin sessions, login throttling, upload
 Deploy `google-apps-script/Code.gs` as a web app and use its `/exec` URL in Netlify. Confirm the template and certificate folder IDs near the top of the script and authorize its Sheets, Drive, Slides, email, and user-information permissions.
 
 For a new spreadsheet, run `setupParticipantFeedbackSheets()` once from the Apps Script editor. It creates the `Activity`, `Responses`, `Questions`, `Whitelist`, and `Users` sheets, adds any missing headers without deleting existing records, formats the header rows, and inserts the initial 15 editable survey questions. The function is safe to run again after future updates.
+
+Run the setup function again after enabling certificate verification. It adds `Verification Code` and `Verification URL` to `Responses` without changing existing records. New submissions receive verification codes automatically; reprocessing an older response assigns it a code.
+
+Certificate templates may include `{{VerificationCode}}`, `{{VerificationUrl}}`, and `{{QRCode}}`. Make `{{QRCode}}` its own text box sized to the QR image area. The generated QR code opens `/verification` with the certificate code prefilled.
 
 After sheet setup, run `setupParticipantFeedbackSecurity()`. Copy its one-time `submitSharedToken` result into Netlify as `SUBMIT_SHARED_TOKEN`. Apps Script retains only the token hash; the separate session hashing secret remains in Script Properties. Then edit the host account inside `seedUsers()`, run `seedUsers()`, and run `setupCertificateQueueTrigger()`.
 

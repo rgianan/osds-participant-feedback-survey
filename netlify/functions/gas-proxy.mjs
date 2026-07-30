@@ -1,3 +1,5 @@
+import { createHash } from "node:crypto";
+
 const json = (statusCode, payload) => ({
   statusCode,
   headers: {
@@ -38,7 +40,68 @@ export const handler = async (event) => {
     const payload = JSON.parse(body);
     if (!payload || typeof payload !== "object" || Array.isArray(payload))
       return json(400, { ok: false, error: "Invalid JSON request." });
+    const portalBaseUrl = String(
+      process.env.PORTAL_BASE_URL || process.env.URL || "",
+    ).trim();
+    const protectedActions = {
+      submitFeedback: "participant_submit",
+      adminLogin: "admin_login",
+    };
+    const expectedAction = protectedActions[payload.action];
+    if (expectedAction) {
+      const turnstileSecret = String(
+        process.env.TURNSTILE_SECRET_KEY || "",
+      ).trim();
+      const turnstileToken = String(
+        payload.turnstileToken || payload.payload?.turnstileToken || "",
+      ).trim();
+      if (!turnstileSecret)
+        return json(500, {
+          ok: false,
+          error: "Turnstile is not configured on the server.",
+        });
+      if (!turnstileToken)
+        return json(400, {
+          ok: false,
+          error: "Please complete the security verification.",
+        });
+      const verification = await fetch(
+        "https://challenges.cloudflare.com/turnstile/v0/siteverify",
+        {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({
+            secret: turnstileSecret,
+            response: turnstileToken,
+            idempotency_key: (() => {
+              const hash = createHash("sha256")
+                .update(turnstileToken)
+                .digest("hex")
+                .slice(0, 32);
+              return `${hash.slice(0, 8)}-${hash.slice(8, 12)}-4${hash.slice(13, 16)}-a${hash.slice(17, 20)}-${hash.slice(20, 32)}`;
+            })(),
+            remoteip:
+              event.headers?.["x-nf-client-connection-ip"] ||
+              event.headers?.["x-forwarded-for"]?.split(",")[0]?.trim(),
+          }),
+          signal: AbortSignal.timeout(8_000),
+        },
+      ).then((response) => response.json());
+      const expectedHostname = String(event.headers?.host || "").split(":")[0];
+      if (
+        !verification.success ||
+        verification.action !== expectedAction ||
+        (expectedHostname && verification.hostname !== expectedHostname)
+      )
+        return json(403, {
+          ok: false,
+          error: "Security verification expired or failed. Please try again.",
+        });
+      delete payload.turnstileToken;
+      if (payload.payload) delete payload.payload.turnstileToken;
+    }
     payload.proxyToken = sharedToken;
+    payload.portalBaseUrl = portalBaseUrl;
     const upstream = await fetch(gasUrl, {
       method: "POST",
       headers: { "content-type": "text/plain;charset=utf-8" },

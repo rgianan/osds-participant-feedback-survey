@@ -1,10 +1,12 @@
-import React, { useEffect, useMemo, useState } from "react";
+import React, { useEffect, useMemo, useRef, useState } from "react";
 import {
   ArrowLeft,
   ArrowRight,
+  BadgeCheck,
   Check,
   ChevronDown,
   Download,
+  ExternalLink,
   FileCheck2,
   LayoutDashboard,
   ListChecks,
@@ -35,7 +37,59 @@ import {
   saveAdminUser,
   submitFeedback,
   uploadSignature,
+  verifyCertificate,
 } from "../lib/api";
+
+const TURNSTILE_SITE_KEY = import.meta.env.VITE_TURNSTILE_SITE_KEY || "";
+
+function TurnstileWidget({ action, onToken, resetKey = 0 }) {
+  const container = useRef(null),
+    widgetId = useRef(null);
+  useEffect(() => {
+    if (!TURNSTILE_SITE_KEY) return;
+    let cancelled = false;
+    const render = () => {
+      if (cancelled || !container.current || !window.turnstile) return;
+      if (widgetId.current !== null) window.turnstile.remove(widgetId.current);
+      widgetId.current = window.turnstile.render(container.current, {
+        sitekey: TURNSTILE_SITE_KEY,
+        action,
+        theme: "light",
+        size: "flexible",
+        callback: onToken,
+        "expired-callback": () => onToken(""),
+        "error-callback": () => onToken(""),
+      });
+    };
+    if (window.turnstile) render();
+    else {
+      let script = document.querySelector('script[data-ched-turnstile="true"]');
+      if (!script) {
+        script = document.createElement("script");
+        script.src =
+          "https://challenges.cloudflare.com/turnstile/v0/api.js?render=explicit";
+        script.async = true;
+        script.defer = true;
+        script.dataset.chedTurnstile = "true";
+        document.head.appendChild(script);
+      }
+      script.addEventListener("load", render, { once: true });
+    }
+    return () => {
+      cancelled = true;
+      if (widgetId.current !== null && window.turnstile)
+        window.turnstile.remove(widgetId.current);
+      widgetId.current = null;
+    };
+  }, [action, onToken, resetKey]);
+  if (!TURNSTILE_SITE_KEY)
+    return (
+      <div className="alert">
+        Turnstile is not configured. Add VITE_TURNSTILE_SITE_KEY in Netlify.
+      </div>
+    );
+  return <div className="turnstile-wrap" ref={container} />;
+}
 
 const emptyForm = {
   name: "",
@@ -117,7 +171,9 @@ export function PublicForm() {
     [ratings, setRatings] = useState({}),
     [busy, setBusy] = useState(false),
     [done, setDone] = useState(null),
-    [error, setError] = useState("");
+    [error, setError] = useState(""),
+    [turnstileToken, setTurnstileToken] = useState(""),
+    [turnstileReset, setTurnstileReset] = useState(0);
   useEffect(() => {
     Promise.all([getActivities(), getQuestions()])
       .then(([a, q]) => {
@@ -153,18 +209,25 @@ export function PublicForm() {
       return;
     }
     if (step < 3) return setStep((s) => s + 1);
+    if (!turnstileToken) {
+      setError("Please complete the security verification before submitting.");
+      return;
+    }
     setBusy(true);
     try {
       const answers = Object.fromEntries(
         questions.map((_, i) => [`answer${i + 1}`, ratings[i]]),
       );
-      const res = await submitFeedback({
-        ...form,
-        title: activity?.title || "",
-        venue: activity?.venue || "",
-        activity_date: activity?.date || "",
-        ...answers,
-      });
+      const res = await submitFeedback(
+        {
+          ...form,
+          title: activity?.title || "",
+          venue: activity?.venue || "",
+          activity_date: activity?.date || "",
+          ...answers,
+        },
+        turnstileToken,
+      );
       if (res.status === "BAD_REQUEST")
         throw new Error(res.message || "Please check your response.");
       if (res.status === "DUP")
@@ -174,6 +237,8 @@ export function PublicForm() {
       setDone(res);
     } catch (e) {
       setError(e.message);
+      setTurnstileToken("");
+      setTurnstileReset((value) => value + 1);
     } finally {
       setBusy(false);
     }
@@ -210,6 +275,8 @@ export function PublicForm() {
                 setStep(0);
                 setForm(emptyForm);
                 setRatings({});
+                setTurnstileToken("");
+                setTurnstileReset((value) => value + 1);
               }}
             >
               Submit another response
@@ -231,6 +298,13 @@ export function PublicForm() {
     <div>
       <header className="topbar">
         <Brand />
+        <a
+          className="verification-link"
+          href="/verification"
+          title="Verify an issued CHED certificate"
+        >
+          <BadgeCheck size={18} /> Verify certificate
+        </a>
       </header>
       <main className="survey-shell">
         <section className="survey-intro">
@@ -419,6 +493,11 @@ export function PublicForm() {
                         placeholder="Your suggestions are welcome..."
                       />
                     </label>
+                    <TurnstileWidget
+                      action="participant_submit"
+                      onToken={setTurnstileToken}
+                      resetKey={turnstileReset}
+                    />
                   </>
                 )}
               </>
@@ -436,7 +515,7 @@ export function PublicForm() {
             </button>
             <button
               className="button primary"
-              disabled={busy}
+              disabled={busy || (step === 3 && !turnstileToken)}
               onClick={next}
               title={
                 step === 3
@@ -459,19 +538,149 @@ export function PublicForm() {
   );
 }
 
+export function VerificationPage() {
+  const initialCode =
+    new URLSearchParams(window.location.search).get("code") || "";
+  const [code, setCode] = useState(initialCode.toUpperCase()),
+    [result, setResult] = useState(null),
+    [busy, setBusy] = useState(false),
+    [error, setError] = useState("");
+  async function verify(event) {
+    event?.preventDefault();
+    const normalized = code.trim().toUpperCase();
+    if (!normalized)
+      return setError(
+        "Enter the verification code printed on the certificate.",
+      );
+    setBusy(true);
+    setError("");
+    setResult(null);
+    try {
+      setResult(await verifyCertificate(normalized));
+    } catch (verifyError) {
+      setError(verifyError.message || "Unable to verify this certificate.");
+    } finally {
+      setBusy(false);
+    }
+  }
+  useEffect(() => {
+    if (initialCode) verify();
+  }, []);
+  return (
+    <div className="verification-page">
+      <header className="topbar">
+        <Brand />
+        <a
+          className="verification-link"
+          href="/"
+          title="Open the participant feedback portal"
+        >
+          <ArrowLeft size={18} /> Feedback portal
+        </a>
+      </header>
+      <main className="verification-shell">
+        <section className="verification-intro">
+          <p className="eyebrow">
+            <BadgeCheck size={15} /> Certificate validation
+          </p>
+          <h1>Verify a CHED certificate</h1>
+          <p>
+            Enter the code printed on the certificate, or scan its QR code, to
+            confirm that it was issued through this portal.
+          </p>
+        </section>
+        <form className="verification-card" onSubmit={verify}>
+          <label>
+            Certificate verification code{" "}
+            <input
+              value={code}
+              onChange={(event) => setCode(event.target.value.toUpperCase())}
+              placeholder="CHED-XXXXXXXXXXXXXXXXXXXX"
+              autoComplete="off"
+            />
+          </label>
+          <button
+            className="button primary"
+            disabled={busy}
+            title="Check this certificate against the issuance registry"
+          >
+            <BadgeCheck size={18} /> {busy ? "Checking…" : "Verify certificate"}
+          </button>
+          {error && <div className="alert">{error}</div>}
+          {result &&
+            (result.valid ? (
+              <article className="verification-result valid">
+                <BadgeCheck />
+                <div>
+                  <span>Authentic certificate</span>
+                  <h2>{result.name}</h2>
+                  <dl>
+                    <div>
+                      <dt>Activity</dt>
+                      <dd>{result.activity}</dd>
+                    </div>
+                    <div>
+                      <dt>Activity date</dt>
+                      <dd>{result.activityDate || "—"}</dd>
+                    </div>
+                    <div>
+                      <dt>Venue</dt>
+                      <dd>{result.venue || "—"}</dd>
+                    </div>
+                    <div>
+                      <dt>Verification code</dt>
+                      <dd>{result.verificationCode}</dd>
+                    </div>
+                  </dl>
+                  {result.certificateUrl && (
+                    <a
+                      href={result.certificateUrl}
+                      target="_blank"
+                      rel="noreferrer"
+                      title="Open the registered certificate PDF"
+                    >
+                      View registered PDF <ExternalLink size={15} />
+                    </a>
+                  )}
+                </div>
+              </article>
+            ) : (
+              <article className="verification-result invalid">
+                <X />
+                <div>
+                  <span>Certificate not verified</span>
+                  <p>
+                    No issued certificate matches this code. Check the code
+                    carefully or contact the activity organizer.
+                  </p>
+                </div>
+              </article>
+            ))}
+        </form>
+      </main>
+    </div>
+  );
+}
+
 function AdminLogin({ onAuthenticated }) {
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
+  const [turnstileToken, setTurnstileToken] = useState("");
+  const [turnstileReset, setTurnstileReset] = useState(0);
   async function submit(event) {
     event.preventDefault();
     setBusy(true);
     setError("");
     try {
-      onAuthenticated(await adminLogin(email, password));
+      if (!turnstileToken)
+        throw new Error("Please complete the security verification.");
+      onAuthenticated(await adminLogin(email, password, turnstileToken));
     } catch (loginError) {
       setError(loginError.message || "Unable to sign in.");
+      setTurnstileToken("");
+      setTurnstileReset((value) => value + 1);
     } finally {
       setBusy(false);
     }
@@ -507,10 +716,15 @@ function AdminLogin({ onAuthenticated }) {
             placeholder="Enter your password"
           />
         </label>
+        <TurnstileWidget
+          action="admin_login"
+          onToken={setTurnstileToken}
+          resetKey={turnstileReset}
+        />
         {error && <div className="alert">{error}</div>}
         <button
           className="button primary login-submit"
-          disabled={busy}
+          disabled={busy || !turnstileToken}
           title="Sign in to the protected admin module"
         >
           <LogIn size={18} /> {busy ? "Signing in…" : "Sign in"}

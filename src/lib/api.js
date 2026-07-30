@@ -138,9 +138,9 @@ export async function getQuestions() {
     );
   return questions;
 }
-export async function submitFeedback(payload) {
+export async function submitFeedback(payload, turnstileToken = "") {
   if (window.google?.script) return gasRun("submitFeedback", payload);
-  if (HAS_REMOTE) return remote("submitFeedback", { payload });
+  if (HAS_REMOTE) return remote("submitFeedback", { payload, turnstileToken });
   if (DEMO_MODE) {
     await sleep(500);
     return { status: "QUEUED", message: "Demo feedback queued." };
@@ -270,10 +270,16 @@ export async function saveAdminQuestions(questions) {
   if (!DEMO_MODE) requireBackend();
   return questions;
 }
-export async function adminLogin(email, password) {
+export async function verifyCertificate(code) {
+  if (window.google?.script) return gasRun("verifyCertificate", code);
+  if (HAS_REMOTE) return remote("verifyCertificate", { code });
+  if (!DEMO_MODE) requireBackend();
+  return { valid: false };
+}
+export async function adminLogin(email, password, turnstileToken = "") {
   if (!HAS_REMOTE && !DEMO_MODE) requireBackend();
   const session = HAS_REMOTE
-    ? await remote("adminLogin", { email, password })
+    ? await remote("adminLogin", { email, password, turnstileToken })
     : {
         token: "demo-session",
         user: { email, name: "Portal Host", role: "superadmin" },

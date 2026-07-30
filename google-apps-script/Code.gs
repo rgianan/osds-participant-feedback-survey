@@ -59,6 +59,8 @@ function doPost(e) {
     var body = JSON.parse(raw);
     assertSubmitSharedToken_(body.proxyToken);
     delete body.proxyToken;
+    rememberPortalBaseUrl_(body.portalBaseUrl);
+    delete body.portalBaseUrl;
     var action = safeTrim_(body.action);
     var data;
 
@@ -77,6 +79,7 @@ function doPost(e) {
     else if (action === 'adminSaveUser') data = adminSaveUser(body.payload || {}, body.adminToken);
     else if (action === 'adminGetQuestions') data = adminGetQuestions(body.adminToken);
     else if (action === 'adminSaveQuestions') data = adminSaveQuestions(body.questions || (body.payload && body.payload.questions) || [], body.adminToken);
+    else if (action === 'verifyCertificate') data = verifyCertificate(body.code);
     else throw new Error('Unknown action: ' + action);
 
     return jsonResponse_({ ok: true, data: data });
@@ -189,6 +192,16 @@ function setupParticipantFeedbackSecurity() {
   };
 }
 
+/**
+ * Run this instead of setupParticipantFeedbackSecurity() when you need to see
+ * the token. Apps Script does not display return values, so the result is
+ * written to the execution log. Rotates both secrets, exactly like the
+ * function it wraps. Clear the log afterwards.
+ */
+function logSubmitSharedToken() {
+  Logger.log(JSON.stringify(setupParticipantFeedbackSecurity(), null, 2));
+}
+
 function assertSubmitSharedToken_(token) {
   var expected = PropertiesService.getScriptProperties().getProperty('SUBMIT_SHARED_TOKEN_HASH');
   if (!expected) throw new Error('Backend security is not configured. Run setupParticipantFeedbackSecurity().');
@@ -198,6 +211,7 @@ function assertSubmitSharedToken_(token) {
 function randomSecret_() { return Utilities.getUuid().replace(/-/g,'') + Utilities.getUuid().replace(/-/g,'') + Utilities.getUuid().replace(/-/g,''); }
 function sha256Base64_(value) { return Utilities.base64EncodeWebSafe(Utilities.computeDigest(Utilities.DigestAlgorithm.SHA_256,String(value||''),Utilities.Charset.UTF_8)).replace(/=+$/,''); }
 function hmac256Base64_(value, secret) { return Utilities.base64EncodeWebSafe(Utilities.computeHmacSha256Signature(String(value||''),String(secret||''),Utilities.Charset.UTF_8)).replace(/=+$/,''); }
+function rememberPortalBaseUrl_(url) { url=safeTrim_(url).replace(/\/$/,'');if(!/^https:\/\/[a-z0-9.-]+(?::\d+)?$/i.test(url))return;var props=PropertiesService.getScriptProperties();if(props.getProperty('PORTAL_BASE_URL')!==url)props.setProperty('PORTAL_BASE_URL',url); }
 
 // --------------------------- First-time sheet setup ---------------------------
 /**
@@ -238,6 +252,8 @@ function setupParticipantFeedbackSheets() {
       setupColumn_('Suggestions', ['recommendations','improvements']),
       setupColumn_('Email Sent', ['emailsent','email_sent','sent','date emailed']),
       setupColumn_('Certificate Link', ['certificate','cert link','certificate url']),
+      setupColumn_('Verification Code', ['verification id','certificate id']),
+      setupColumn_('Verification URL', ['verify url']),
       setupColumn_('cStatus', ['status','processing status'])
     ]);
     var responses = ensureSetupSheet_(ss, 'Responses', responseColumns);
@@ -613,6 +629,8 @@ function submitFeedback(formData) {
     // Email sent / Certificate link / cStatus — initialized here
     setCol_(['email sent','emailsent','email_sent','sent','date emailed'], '');
     setCol_(['certificate','certificate link','cert link','certificate url'], '');
+    setCol_(['verification code','verification id','certificate id'], makeVerificationCode_());
+    setCol_(['verification url','verify url'], '');
     setCol_(['cstatus','status','processing status'], 'PENDING');
 
     // Single write under lock
@@ -661,6 +679,34 @@ function ensureCertificateQueueTrigger_() {
   var props = PropertiesService.getScriptProperties();
   if (props.getProperty('CERTIFICATE_QUEUE_TRIGGER_READY') === '1') return;
   setupCertificateQueueTrigger();
+}
+
+function makeVerificationCode_() { return 'CHED-' + Utilities.getUuid().replace(/-/g,'').slice(0,20).toUpperCase(); }
+
+function ensureResponseVerification_(sheet, header, rowIndex, rowValues) {
+  var cCode=idxOf_(header,['verification code','verification id','certificate id']),cUrl=idxOf_(header,['verification url','verify url']);
+  if(cCode<0){sheet.getRange(1,sheet.getLastColumn()+1).setValue('Verification Code');header=getHeaderMap_(sheet);cCode=idxOf_(header,['verification code']);}
+  if(cUrl<0){sheet.getRange(1,sheet.getLastColumn()+1).setValue('Verification URL');header=getHeaderMap_(sheet);cUrl=idxOf_(header,['verification url']);}
+  var code=safeTrim_(rowValues[cCode])||makeVerificationCode_(),base=PropertiesService.getScriptProperties().getProperty('PORTAL_BASE_URL')||'';
+  if(!base)throw new Error('Portal URL is not configured. Submit through the deployed Netlify portal once, or set PORTAL_BASE_URL in Script Properties.');
+  var url=base.replace(/\/$/,'')+'/verification?code='+encodeURIComponent(code);
+  sheet.getRange(rowIndex,cCode+1).setValue(code);sheet.getRange(rowIndex,cUrl+1).setValue(url);
+  return {code:code,url:url};
+}
+
+function verifyCertificate(code) {
+  code=safeTrim_(code).toUpperCase();
+  if(!/^CHED-[A-F0-9]{20}$/.test(code))return {valid:false};
+  var sh=SpreadsheetApp.getActiveSpreadsheet().getSheetByName('Responses');
+  if(!sh||sh.getLastRow()<2)return {valid:false};
+  var hdr=getHeaderMap_(sh),cCode=idxOf_(hdr,['verification code','verification id','certificate id']),cStatus=idxOf_(hdr,['cstatus','status','processing status']);
+  if(cCode<0||cStatus<0)return {valid:false};
+  var match=sh.getRange(2,cCode+1,sh.getLastRow()-1,1).createTextFinder(code).matchEntireCell(true).matchCase(false).findNext();
+  if(!match)return {valid:false};
+  var row=sh.getRange(match.getRow(),1,1,sh.getLastColumn()).getValues()[0];
+  if(safeTrim_(row[cStatus]).toUpperCase()!=='OK')return {valid:false};
+  function value(names){var col=idxOf_(hdr,names);return col>=0?row[col]:'';}
+  return {valid:true,verificationCode:code,name:safeTrim_(value(['name'])),activity:safeTrim_(value(['title of activity','title','activity title'])),activityDate:fmtDate_(value(['activity_date','date of activity'])),venue:safeTrim_(value(['venue','location'])),issuedAt:fmtDate_(value(['email sent','date emailed'])),certificateUrl:safeTrim_(value(['certificate link','certificate','certificate url']))};
 }
 
 /**
@@ -743,6 +789,7 @@ function sendCertificateForResponse_(responsesRowIndex) {
   var title = (cTitle >= 0) ? safeTrim_(r[cTitle]) : '';
   var email = (cEmail >= 0) ? safeTrim_(r[cEmail]) : '';
   var activityId = (cActId >= 0) ? safeTrim_(r[cActId]) : '';
+  var verification = ensureResponseVerification_(respSh,respHdr,responsesRowIndex,r);
 
   if (!name)  throw new Error('Response "Name" is blank.');
   if (!activityId && !title) throw new Error('Response missing ActivityID/Title.');
@@ -809,6 +856,9 @@ function sendCertificateForResponse_(responsesRowIndex) {
   if (aSignatory) pres.replaceAllText('{{Signatory}}', aSignatory);
   if (aDesignation) pres.replaceAllText('{{Designation}}', aDesignation);
   if (aSignature) replaceSignaturePlaceholder_(pres, aSignature);
+  pres.replaceAllText('{{VerificationCode}}', verification.code);
+  pres.replaceAllText('{{VerificationUrl}}', verification.url);
+  replaceQrPlaceholder_(pres, verification.url);
   pres.saveAndClose();
 
   // --- Export to PDF, store, and share ---
@@ -833,11 +883,12 @@ function sendCertificateForResponse_(responsesRowIndex) {
     var bodyText =
       'Dear ' + name + ',\n\n' +
       'Your certificate for "' + aTitle + '" is ready:\n' + certUrl + '\n\n' +
-      'Thank you.';
+      'Verification code: ' + verification.code + '\nVerify: ' + verification.url + '\n\nThank you.';
     var bodyHtml =
       '<p>Dear ' + escapeHtml_(name) + ',</p>' +
       '<p>Your certificate for "<b>' + escapeHtml_(aTitle) + '</b>" is ready:</p>' +
       '<p><a href="' + escapeHtml_(certUrl) + '">Open certificate (PDF)</a></p>' +
+      '<p>Verification code: <b>' + escapeHtml_(verification.code) + '</b><br><a href="' + escapeHtml_(verification.url) + '">Verify certificate</a></p>' +
       '<p>Thank you.</p>';
 
     MailApp.sendEmail({
@@ -867,6 +918,13 @@ function replaceSignaturePlaceholder_(presentation, signatureUrl) {
       } catch (_) {}
     });
   });
+}
+
+function replaceQrPlaceholder_(presentation, verificationUrl) {
+  var blob=null;
+  presentation.getSlides().forEach(function(slide){slide.getShapes().forEach(function(shape){
+    try{if(shape.getText().asString().indexOf('{{QRCode}}')<0)return;if(!blob)blob=UrlFetchApp.fetch('https://quickchart.io/qr?size=300&margin=2&text='+encodeURIComponent(verificationUrl)).getBlob().setName('verification-qr.png');var left=shape.getLeft(),top=shape.getTop(),width=shape.getWidth(),height=shape.getHeight();shape.remove();slide.insertImage(blob,left,top,width,height);}catch(_){try{shape.getText().replaceAllText('{{QRCode}}','');}catch(__){}}
+  });});
 }
 
 // --------------------- Drive REST helpers ----------------------------
