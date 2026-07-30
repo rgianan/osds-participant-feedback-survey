@@ -1,4 +1,10 @@
 const GAS_URL = import.meta.env.VITE_GAS_WEB_APP_URL || "";
+const USE_NETLIFY_PROXY =
+  import.meta.env.PROD || import.meta.env.VITE_USE_NETLIFY_PROXY === "true";
+const REMOTE_URL = USE_NETLIFY_PROXY
+  ? "/.netlify/functions/gas-proxy"
+  : GAS_URL;
+const HAS_REMOTE = Boolean(REMOTE_URL);
 const DEMO_MODE =
   import.meta.env.DEV && import.meta.env.VITE_ENABLE_DEMO_MODE === "true";
 const SESSION_KEY = "participant_feedback_admin_session";
@@ -80,13 +86,13 @@ function gasRun(method, ...args) {
 
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 const requireBackend = () => {
-  if (!GAS_URL && !window.google?.script)
+  if (!HAS_REMOTE && !window.google?.script)
     throw new Error("The production backend is not configured.");
 };
 
 async function remote(action, payload = {}, attempt = 0) {
   try {
-    const response = await fetch(GAS_URL, {
+    const response = await fetch(REMOTE_URL, {
       method: "POST",
       headers: { "Content-Type": "text/plain;charset=utf-8" },
       body: JSON.stringify({ action, ...payload }),
@@ -111,14 +117,14 @@ async function remote(action, payload = {}, attempt = 0) {
 }
 
 export async function getActivities() {
-  if (DEMO_MODE && !GAS_URL) return demoActivities;
+  if (DEMO_MODE && !HAS_REMOTE) return demoActivities;
   requireBackend();
   return window.google?.script
     ? gasRun("getActivityData")
     : remote("getActivityData");
 }
 export async function getQuestions() {
-  if (DEMO_MODE && !GAS_URL) return demoQuestions;
+  if (DEMO_MODE && !HAS_REMOTE) return demoQuestions;
   requireBackend();
   const q = window.google?.script
     ? await gasRun("getQuestions")
@@ -134,7 +140,7 @@ export async function getQuestions() {
 }
 export async function submitFeedback(payload) {
   if (window.google?.script) return gasRun("submitFeedback", payload);
-  if (GAS_URL) return remote("submitFeedback", { payload });
+  if (HAS_REMOTE) return remote("submitFeedback", { payload });
   if (DEMO_MODE) {
     await sleep(500);
     return { status: "QUEUED", message: "Demo feedback queued." };
@@ -143,7 +149,7 @@ export async function submitFeedback(payload) {
 }
 export async function getAdminActivities() {
   if (window.google?.script) return gasRun("adminGetActivities", adminToken());
-  if (GAS_URL)
+  if (HAS_REMOTE)
     return remote("adminGetActivities", { adminToken: adminToken() });
   if (!DEMO_MODE) requireBackend();
   return demoActivities.map((a, i) => ({
@@ -161,7 +167,7 @@ export async function getAdminActivities() {
 export async function saveActivity(payload) {
   if (window.google?.script)
     return gasRun("adminSaveActivity", payload, adminToken());
-  if (GAS_URL)
+  if (HAS_REMOTE)
     return remote("adminSaveActivity", { payload, adminToken: adminToken() });
   if (!DEMO_MODE) requireBackend();
   return payload;
@@ -169,7 +175,7 @@ export async function saveActivity(payload) {
 export async function deleteActivity(id) {
   if (window.google?.script)
     return gasRun("adminDeleteActivity", id, adminToken());
-  if (GAS_URL)
+  if (HAS_REMOTE)
     return remote("adminDeleteActivity", { id, adminToken: adminToken() });
   if (!DEMO_MODE) requireBackend();
   return true;
@@ -186,7 +192,7 @@ export async function uploadSignature(file) {
   const payload = { filename: file.name, mimeType: file.type, base64 };
   if (window.google?.script)
     return gasRun("adminUploadSignature", payload, adminToken());
-  if (GAS_URL)
+  if (HAS_REMOTE)
     return remote("adminUploadSignature", {
       payload,
       adminToken: adminToken(),
@@ -197,7 +203,7 @@ export async function uploadSignature(file) {
 export async function getFeedbackAnalytics(activityId = "") {
   if (window.google?.script)
     return gasRun("adminGetFeedbackAnalytics", activityId, adminToken());
-  if (GAS_URL)
+  if (HAS_REMOTE)
     return remote("adminGetFeedbackAnalytics", {
       adminToken: adminToken(),
       activityId,
@@ -224,7 +230,7 @@ export async function getFeedbackAnalytics(activityId = "") {
 }
 export async function getAdminUsers() {
   if (window.google?.script) return gasRun("adminGetUsers", adminToken());
-  if (GAS_URL) return remote("adminGetUsers", { adminToken: adminToken() });
+  if (HAS_REMOTE) return remote("adminGetUsers", { adminToken: adminToken() });
   if (!DEMO_MODE) requireBackend();
   return [
     {
@@ -241,21 +247,22 @@ export async function getAdminUsers() {
 export async function saveAdminUser(payload) {
   if (window.google?.script)
     return gasRun("adminSaveUser", payload, adminToken());
-  if (GAS_URL)
+  if (HAS_REMOTE)
     return remote("adminSaveUser", { payload, adminToken: adminToken() });
   if (!DEMO_MODE) requireBackend();
   return { ...payload, user_id: payload.user_id || `U-${Date.now()}` };
 }
 export async function getAdminQuestions() {
   if (window.google?.script) return gasRun("adminGetQuestions", adminToken());
-  if (GAS_URL) return remote("adminGetQuestions", { adminToken: adminToken() });
+  if (HAS_REMOTE)
+    return remote("adminGetQuestions", { adminToken: adminToken() });
   if (!DEMO_MODE) requireBackend();
   return demoQuestions;
 }
 export async function saveAdminQuestions(questions) {
   if (window.google?.script)
     return gasRun("adminSaveQuestions", questions, adminToken());
-  if (GAS_URL)
+  if (HAS_REMOTE)
     return remote("adminSaveQuestions", {
       questions,
       adminToken: adminToken(),
@@ -264,8 +271,8 @@ export async function saveAdminQuestions(questions) {
   return questions;
 }
 export async function adminLogin(email, password) {
-  if (!GAS_URL && !DEMO_MODE) requireBackend();
-  const session = GAS_URL
+  if (!HAS_REMOTE && !DEMO_MODE) requireBackend();
+  const session = HAS_REMOTE
     ? await remote("adminLogin", { email, password })
     : {
         token: "demo-session",
@@ -277,7 +284,7 @@ export async function adminLogin(email, password) {
 }
 export async function adminLogout() {
   try {
-    if (GAS_URL && adminToken())
+    if (HAS_REMOTE && adminToken())
       await remote("adminLogout", { adminToken: adminToken() });
   } finally {
     clearAdminSession();

@@ -57,6 +57,8 @@ function doPost(e) {
     var raw = (e && e.postData && e.postData.contents) || '{}';
     if (raw.length > 6000000) throw new Error('Request payload is too large.');
     var body = JSON.parse(raw);
+    assertSubmitSharedToken_(body.proxyToken);
+    delete body.proxyToken;
     var action = safeTrim_(body.action);
     var data;
 
@@ -164,6 +166,39 @@ function makeActivityId_(){
   return 'A-' + Utilities.getUuid().replace(/-/g,'').slice(0,8);
 }
 
+/**
+ * Run once and copy the returned submitSharedToken into Netlify as
+ * SUBMIT_SHARED_TOKEN. Apps Script stores only its SHA-256 hash. The separate
+ * session secret never leaves Script Properties and keys all session hashes.
+ * Running this again rotates both secrets and signs out every administrator.
+ */
+function setupParticipantFeedbackSecurity() {
+  var sharedToken = randomSecret_(), sessionSecret = randomSecret_(), properties = PropertiesService.getScriptProperties();
+  var existing = properties.getProperties();
+  Object.keys(existing).forEach(function(key){if(key.indexOf('ADMIN_SESSION_')===0)properties.deleteProperty(key);});
+  properties.setProperties({
+    SUBMIT_SHARED_TOKEN_HASH: sha256Base64_(sharedToken),
+    SESSION_HASH_SECRET: sessionSecret,
+    SECURITY_SECRETS_UPDATED_AT: new Date().toISOString()
+  }, false);
+  return {
+    status: 'OK',
+    submitSharedToken: sharedToken,
+    netlifyVariable: 'SUBMIT_SHARED_TOKEN',
+    warning: 'Copy this token to Netlify now. It is not stored in plain text by Apps Script. Existing admin sessions have been invalidated.'
+  };
+}
+
+function assertSubmitSharedToken_(token) {
+  var expected = PropertiesService.getScriptProperties().getProperty('SUBMIT_SHARED_TOKEN_HASH');
+  if (!expected) throw new Error('Backend security is not configured. Run setupParticipantFeedbackSecurity().');
+  if (!token || !constantTimeEquals_(sha256Base64_(String(token)), expected)) throw new Error('Forbidden: invalid submit token.');
+}
+
+function randomSecret_() { return Utilities.getUuid().replace(/-/g,'') + Utilities.getUuid().replace(/-/g,'') + Utilities.getUuid().replace(/-/g,''); }
+function sha256Base64_(value) { return Utilities.base64EncodeWebSafe(Utilities.computeDigest(Utilities.DigestAlgorithm.SHA_256,String(value||''),Utilities.Charset.UTF_8)).replace(/=+$/,''); }
+function hmac256Base64_(value, secret) { return Utilities.base64EncodeWebSafe(Utilities.computeHmacSha256Signature(String(value||''),String(secret||''),Utilities.Charset.UTF_8)).replace(/=+$/,''); }
+
 // --------------------------- First-time sheet setup ---------------------------
 /**
  * Creates the spreadsheet schema required by this portal.
@@ -240,7 +275,7 @@ function setupParticipantFeedbackSheets() {
       sheets: [activity, responses, questions, whitelist, users].map(function(result){
         return {name:result.sheet.getName(),created:result.created,headersAdded:result.headersAdded,seeded:!!result.seeded};
       }),
-      nextStep: 'Edit the host account in seedUsers(), run seedUsers(), then run setupCertificateQueueTrigger().'
+      nextStep: 'Run setupParticipantFeedbackSecurity(), copy its submit token to Netlify, then run seedUsers() and setupCertificateQueueTrigger().'
     };
   } finally { lock.releaseLock(); }
 }
@@ -1397,7 +1432,7 @@ function getCredentialUser_(email){
   var values=sh.getRange(row,1,1,sh.getLastColumn()).getValues()[0],cName=idxOf_(hdr,['name','display name']),cRole=idxOf_(hdr,['role']),cActive=idxOf_(hdr,['active']);
   return {email:email,name:cName>=0?safeTrim_(values[cName])||email:email,role:cRole>=0?safeTrim_(values[cRole]).toLowerCase()||'admin':'admin',active:cActive<0||String(values[cActive]).toLowerCase()!=='false'};
 }
-function adminSessionKey_(token){var digest=Utilities.computeDigest(Utilities.DigestAlgorithm.SHA_256,String(token||''),Utilities.Charset.UTF_8);return'ADMIN_SESSION_'+Utilities.base64EncodeWebSafe(digest).replace(/=+$/,'');}
+function adminSessionKey_(token){var secret=PropertiesService.getScriptProperties().getProperty('SESSION_HASH_SECRET');if(!secret)throw new Error('Session security is not configured. Run setupParticipantFeedbackSecurity().');return'ADMIN_SESSION_'+hmac256Base64_(String(token||''),secret);}
 function adminLoginThrottleKey_(email){var digest=Utilities.computeDigest(Utilities.DigestAlgorithm.SHA_256,String(email||'unknown'),Utilities.Charset.UTF_8);return'LOGIN_ATTEMPTS_'+Utilities.base64EncodeWebSafe(digest).replace(/=+$/,'').slice(0,32);}
 function hashAdminPassword_(password,salt){var value=String(salt||'')+'|'+String(password||'');for(var i=0;i<12000;i++){var digest=Utilities.computeDigest(Utilities.DigestAlgorithm.SHA_256,value,Utilities.Charset.UTF_8);value=Utilities.base64EncodeWebSafe(digest);}return value;}
 function constantTimeEquals_(a,b){a=String(a||'');b=String(b||'');var diff=a.length^b.length,len=Math.max(a.length,b.length);for(var i=0;i<len;i++)diff|=(a.charCodeAt(i%Math.max(1,a.length))||0)^(b.charCodeAt(i%Math.max(1,b.length))||0);return diff===0;}

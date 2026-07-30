@@ -41,10 +41,13 @@ Connect this repository to a new Netlify site. The included configuration automa
 In **Site configuration → Environment variables**, add:
 
 ```text
-VITE_GAS_WEB_APP_URL=https://script.google.com/macros/s/YOUR_DEPLOYMENT_ID/exec
+GAS_WEB_APP_URL=https://script.google.com/macros/s/YOUR_DEPLOYMENT_ID/exec
+SUBMIT_SHARED_TOKEN=TOKEN_RETURNED_BY_SETUP_FUNCTION
 ```
 
-Trigger a new deployment after changing the variable. You can also upload the generated `dist/` directory through Netlify Drop for a preview-only deployment.
+The frontend uses a same-origin Netlify function to forward requests to Apps Script, avoiding browser cross-origin failures. Trigger a new deployment after changing the variable. A manual `dist/` upload does not include the server function and cannot connect to the production backend.
+
+For secure local integration testing, use Netlify Dev and set `VITE_USE_NETLIFY_PROXY=true`. Direct Vite-to-Apps-Script requests do not receive the server-only shared token.
 
 Do not set `VITE_ENABLE_DEMO_MODE` in Netlify. Demo mode is restricted to the local development server and must be explicitly enabled with `VITE_ENABLE_DEMO_MODE=true`.
 
@@ -60,7 +63,7 @@ Deploy `google-apps-script/Code.gs` as a web app and use its `/exec` URL in Netl
 
 For a new spreadsheet, run `setupParticipantFeedbackSheets()` once from the Apps Script editor. It creates the `Activity`, `Responses`, `Questions`, `Whitelist`, and `Users` sheets, adds any missing headers without deleting existing records, formats the header rows, and inserts the initial 15 editable survey questions. The function is safe to run again after future updates.
 
-After sheet setup, edit the host account inside `seedUsers()`, run `seedUsers()`, and then run `setupCertificateQueueTrigger()`.
+After sheet setup, run `setupParticipantFeedbackSecurity()`. Copy its one-time `submitSharedToken` result into Netlify as `SUBMIT_SHARED_TOKEN`. Apps Script retains only the token hash; the separate session hashing secret remains in Script Properties. Then edit the host account inside `seedUsers()`, run `seedUsers()`, and run `setupCertificateQueueTrigger()`.
 
 The queue setup function creates a one-minute processor trigger. Public submissions are written with `PENDING` status and return immediately; the trigger then creates certificates and sends their links through Google Workspace Mail in controlled batches.
 
