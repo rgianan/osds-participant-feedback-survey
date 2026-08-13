@@ -167,3 +167,6 @@
     position: static;
   }
 }
+
+.question-editor label .question-type{margin-top:8px;font-size:12px;padding:8px 10px}
+.question-text textarea{min-height:110px}

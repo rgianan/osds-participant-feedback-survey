@@ -76,6 +76,7 @@ function doPost(e) {
     else if (action === 'adminLogout') data = adminLogout(body.adminToken);
     else if (action === 'adminGetActivities') data = adminGetActivities(body.adminToken);
     else if (action === 'adminSaveActivity') data = adminSaveActivity(body.payload || {}, body.adminToken);
+    else if (action === 'adminSetActivityStatus') data = adminSetActivityStatus(body.payload || {}, body.adminToken);
     else if (action === 'adminDeleteActivity') data = adminDeleteActivity(body.id || (body.payload && body.payload.id), body.adminToken);
     else if (action === 'adminUploadSignature') data = adminUploadSignature(body.payload || {}, body.adminToken);
     else if (action === 'adminGetFeedbackAnalytics') data = adminGetFeedbackAnalytics(body.activityId, body.adminToken);
@@ -249,7 +250,9 @@ function setupParticipantFeedbackSheets() {
       setupColumn_('ActivityID', ['activity id','id']),
       setupColumn_('Region', ['ched region']),
       setupColumn_('Signatory Designation', ['designation']),
-      setupColumn_('E-Signature', ['signature','signature image'])
+      setupColumn_('E-Signature', ['signature','signature image']),
+      setupColumn_('Created By', ['createdby','owner','creator']),
+      setupColumn_('Active', ['enabled','status'])
     ]);
 
     var responseColumns = [
@@ -281,11 +284,20 @@ function setupParticipantFeedbackSheets() {
       'How likely are you to attend a similar activity?'
     ];
     for (var i = 1; i <= 15; i++) questionColumns.push(setupColumn_('question' + i, ['question ' + i]));
+    for (var ti = 1; ti <= 15; ti++) questionColumns.push(setupColumn_('type' + ti, ['type ' + ti, 'question' + ti + ' type']));
     var questions = ensureSetupSheet_(ss, 'Questions', questionColumns);
     var questionSheet = questions.sheet;
     if (questionSheet.getLastRow() < 2 || questionSheet.getRange(2,1,1,15).getDisplayValues()[0].every(function(value){return !safeTrim_(value);})) {
       questionSheet.getRange(2,1,1,15).setValues([defaultQuestions]);
       questions.seeded = true;
+    }
+    // Blank types already read as 'rating'; writing them makes the sheet
+    // self-explanatory for anyone editing it by hand.
+    var typeHeaderMap = getHeaderMap_(questionSheet), firstTypeCol = idxOf_(typeHeaderMap, ['type1']);
+    if (firstTypeCol >= 0) {
+      var existingTypes = questionSheet.getRange(2, firstTypeCol + 1, 1, 15).getDisplayValues()[0];
+      if (existingTypes.every(function(value){ return !safeTrim_(value); }))
+        questionSheet.getRange(2, firstTypeCol + 1, 1, 15).setValues([existingTypes.map(function(){ return 'rating'; })]);
     }
 
     var whitelist = ensureSetupSheet_(ss, 'Whitelist', [
@@ -323,6 +335,10 @@ function ensureSetupSheet_(ss, sheetName, columns) {
   columns.forEach(function(column){
     if (idxOf_(hdr, column.aliases) < 0) {
       var nextColumn = sh.getLastColumn() + 1;
+      // A sheet has a fixed column count (26 on a new one). Writing past it
+      // throws instead of growing the sheet.
+      var maxColumns = sh.getMaxColumns();
+      if (nextColumn > maxColumns) sh.insertColumnsAfter(maxColumns, nextColumn - maxColumns);
       sh.getRange(1,nextColumn).setValue(column.header);
       hdr[String(column.header).toLowerCase()] = nextColumn - 1;
       added.push(column.header);
@@ -337,7 +353,7 @@ function ensureSetupSheet_(ss, sheetName, columns) {
 }
 
 // --------------------------- Tamper-evident audit log ---------------------------
-function isAuditedAction_(action) { return ['adminLogin','adminLogout','adminSaveActivity','adminDeleteActivity','adminUploadSignature','adminSaveUser','adminSaveQuestions'].indexOf(action)>=0; }
+function isAuditedAction_(action) { return ['adminLogin','adminLogout','adminSaveActivity','adminSetActivityStatus','adminDeleteActivity','adminUploadSignature','adminSaveUser','adminSaveQuestions'].indexOf(action)>=0; }
 
 function auditActorForRequest_(action, body) {
   if(action==='adminLogin')return {email:safeTrim_(body.email).toLowerCase(),role:''};
@@ -354,6 +370,7 @@ function auditTargetForRequest_(action, body) {
   var payload=body.payload||{};
   if(action==='adminLogin'||action==='adminLogout')return {type:'session',id:safeTrim_(body.email||(auditActorForRequest_(action,body)||{}).email)};
   if(action==='adminSaveActivity')return {type:'activity',id:safeTrim_(payload.activityId||payload.id||payload.title),details:{operation:payload.id?'update':'create',title:safeTrim_(payload.title).slice(0,160)}};
+  if(action==='adminSetActivityStatus')return {type:'activity',id:safeTrim_(payload.id),details:{operation:(payload.active===true||String(payload.active).toLowerCase()==='true')?'enable':'disable'}};
   if(action==='adminDeleteActivity')return {type:'activity',id:safeTrim_(body.id||(body.payload&&body.payload.id))};
   if(action==='adminUploadSignature')return {type:'signature',id:safeTrim_(payload.filename).slice(0,180)};
   if(action==='adminSaveUser')return {type:'user',id:safeTrim_(payload.user_id||payload.email).toLowerCase(),details:{role:safeTrim_(payload.role).toLowerCase(),active:payload.active!==false}};
@@ -429,8 +446,110 @@ function isWhitelisted_(email) {
 /** Public read caches. Cleared by invalidatePublicCache_() on admin writes. */
 var PUBLIC_CACHE_SECONDS = 900;
 
+/**
+ * Days the feedback form stays open after ToDate. 0 = closes at the end of the
+ * last activity day. Raise this if participants are expected to answer later.
+ */
+var FEEDBACK_GRACE_DAYS = 0;
+
+/** Today at 00:00 in the script timezone, as yyyy-MM-dd. */
+function todayKey_() {
+  return Utilities.formatDate(new Date(), Session.getScriptTimeZone() || 'Asia/Manila', 'yyyy-MM-dd');
+}
+
+function shiftDateKey_(key, days) {
+  key = safeTrim_(key);
+  if (!key) return '';
+  var parts = key.split('-');
+  if (parts.length !== 3) return key;
+  var d = new Date(Number(parts[0]), Number(parts[1]) - 1, Number(parts[2]));
+  if (isNaN(d)) return key;
+  d.setDate(d.getDate() + (days || 0));
+  return Utilities.formatDate(d, Session.getScriptTimeZone() || 'Asia/Manila', 'yyyy-MM-dd');
+}
+
+/**
+ * Is the feedback window open today? Dates are compared as yyyy-MM-dd strings,
+ * which sort lexicographically, so no timezone arithmetic is involved.
+ * A blank FromDate means "no start restriction"; a blank ToDate means the
+ * activity runs for the single FromDate day.
+ */
+function isFeedbackWindowOpen_(fromDate, toDate) {
+  var today = todayKey_();
+  var from = safeTrim_(fromDate);
+  var to = safeTrim_(toDate) || from;
+  if (from && today < from) return false;
+  if (to && today > shiftDateKey_(to, FEEDBACK_GRACE_DAYS)) return false;
+  return true;
+}
+
+/**
+ * Shared gate used by submitFeedback and the certificate queue.
+ * Returns {open, active, inWindow, message} for an Activity row.
+ */
+function activityGateState_(row, hdr) {
+  var cActive = idxOf_(hdr, ['active','enabled','status']);
+  var cFrom   = idxOf_(hdr, ['fromdate','from date','start']);
+  var cTo     = idxOf_(hdr, ['todate','to date','end']);
+  var cDate   = idxOf_(hdr, ['date']);
+
+  var active = cActive < 0 ? true : isActiveCellEnabled_(row[cActive]);
+  var from = cFrom >= 0 ? fmtDate_(row[cFrom]) : '';
+  if (!from && cDate >= 0) from = fmtDate_(row[cDate]);
+  var to = cTo >= 0 ? fmtDate_(row[cTo]) : '';
+  var inWindow = isFeedbackWindowOpen_(from, to);
+
+  var message = '';
+  if (!active) message = 'This activity has been closed by its organizer. Feedback is no longer being collected.';
+  else if (!inWindow) {
+    var today = todayKey_();
+    message = (from && today < from)
+      ? ('Feedback for this activity opens on ' + from + '.')
+      : 'The feedback period for this activity has ended.';
+  }
+  return { open: active && inWindow, active: active, inWindow: inWindow, message: message };
+}
+
+/**
+ * Lookup of switched-off activities, by lowercased ActivityID and by title.
+ * Read once per queue run rather than per response row.
+ */
+function disabledActivityKeys_() {
+  var empty = { ids: {}, titles: {} };
+  var sh = SpreadsheetApp.getActiveSpreadsheet().getSheetByName('Activity');
+  if (!sh) return empty;
+  var lastRow = sh.getLastRow(), lastCol = sh.getLastColumn();
+  if (lastRow < 2 || lastCol < 1) return empty;
+
+  var hdr = getHeaderMap_(sh);
+  var cActive = idxOf_(hdr, ['active','enabled','status']);
+  if (cActive < 0) return empty;
+  var cId = idxOf_(hdr, ['activityid','activity id','id']);
+  var cTitle = idxOf_(hdr, ['title','activity title','activity']);
+
+  var rows = sh.getRange(2, 1, lastRow - 1, lastCol).getValues();
+  rows.forEach(function(row){
+    if (isActiveCellEnabled_(row[cActive])) return;
+    if (cId >= 0) { var id = safeTrim_(row[cId]).toLowerCase(); if (id) empty.ids[id] = true; }
+    if (cTitle >= 0) { var t = safeTrim_(row[cTitle]).toLowerCase(); if (t) empty.titles[t] = true; }
+  });
+  return empty;
+}
+
+/** Activities are enabled unless the Active cell explicitly says otherwise. */
+function isActiveCellEnabled_(value) {
+  var raw = safeTrim_(value).toLowerCase();
+  if (!raw) return true;
+  return ['false','no','off','0','disabled','inactive','closed'].indexOf(raw) < 0;
+}
+
+/** The activity list is date-filtered, so its cache key carries today's date. */
+function activitiesCacheKey_() {
+  return 'PUBLIC_ACTIVITIES_' + todayKey_();
+}
+
 function invalidatePublicCache_() {
-  CacheService.getScriptCache().removeAll(['PUBLIC_ACTIVITIES', 'PUBLIC_QUESTIONS']);
+  CacheService.getScriptCache().removeAll([activitiesCacheKey_(), 'PUBLIC_QUESTIONS']);
 }
 
 /**
@@ -447,7 +566,7 @@ function putPublicCache_(key, value) {
 
 function getActivityData() {
   var cache = CacheService.getScriptCache();
-  var hit = cache.get('PUBLIC_ACTIVITIES');
+  var hit = cache.get(activitiesCacheKey_());
   if (hit) return JSON.parse(hit);
 
   var ss = SpreadsheetApp.getActiveSpreadsheet();
@@ -467,11 +586,20 @@ function getActivityData() {
   var cFrom  = idxOf_(hdrMap, ['fromdate','from date','start']);
   var cTo    = idxOf_(hdrMap, ['todate','to date','end']);
   var cId    = idxOf_(hdrMap, ['activityid','activity id','id']);
+  var cActive = idxOf_(hdrMap, ['active','enabled','status']);
 
   var out = [];
   rows.forEach(function(r){
     var title = cTitle >= 0 ? safeTrim_(r[cTitle]) : '';
     if (!title) return;
+
+    // Participants only ever see activities that are switched on and inside
+    // their feedback window. submitFeedback re-checks both server-side.
+    if (cActive >= 0 && !isActiveCellEnabled_(r[cActive])) return;
+    var winFrom = cFrom >= 0 ? fmtDate_(r[cFrom]) : '';
+    var winTo   = cTo   >= 0 ? fmtDate_(r[cTo])   : '';
+    if (cDate >= 0 && !winFrom) winFrom = fmtDate_(r[cDate]);
+    if (!isFeedbackWindowOpen_(winFrom, winTo)) return;
 
     var venue = cVenue >= 0 ? safeTrim_(r[cVenue]) : '';
     var dateStr = '';
@@ -494,7 +622,7 @@ function getActivityData() {
     });
   });
 
-  putPublicCache_('PUBLIC_ACTIVITIES', out);
+  putPublicCache_(activitiesCacheKey_(), out);
   return out;
 }
 
@@ -512,7 +640,7 @@ function getQuestions() {
   var lastRow = sh.getLastRow();
   var lastCol = sh.getLastColumn();
   var out = {};
-  for (var i = 1; i <= 15; i++) out['question' + i] = '';
+  for (var i = 1; i <= 15; i++) { out['question' + i] = ''; out['type' + i] = 'rating'; }
   if (lastRow < 2 || lastCol < 1) return out;
 
   var hdrMap = getHeaderMap_(sh);
@@ -528,6 +656,8 @@ function getQuestions() {
     var key = 'question' + j;
     var idx = idxOf_(hdrMap, candidatesFor(j));
     out[key] = safeTrim_(idx >= 0 ? (row[idx] || '') : '');
+    var typeIdx = idxOf_(hdrMap, ['type'+j, 'Type'+j, 'type '+j, 'question'+j+' type']);
+    out['type' + j] = normalizeQuestionType_(typeIdx >= 0 ? (row[typeIdx] || '') : '');
   }
   putPublicCache_('PUBLIC_QUESTIONS', out);
   return out;
@@ -705,6 +835,13 @@ function submitFeedback(formData) {
       return { status: 'BAD_REQUEST', message: 'Selected activity not found. Please re-select the activity.' };
     }
 
+    // Re-check the switch and the date window here: the browser may have loaded
+    // the activity list days ago, or before an administrator closed it.
+    var gate = activityGateState_(act.row, act.header);
+    if (!gate.open) {
+      return { status: 'CLOSED', message: gate.message };
+    }
+
     // Prepare to write row using header map (resilient to order)
     var hdrMap = getHeaderMap_(sh);
     var lastCol = sh.getLastColumn();
@@ -731,7 +868,9 @@ function submitFeedback(formData) {
 
     // Answers 1..15
     for (var i = 1; i <= 15; i++) {
-      setCol_(['answer'+i, 'q'+i, 'question'+i], safeTrim_(formData['answer'+i] || formData['question'+i] || ''));
+      // Long-text answers are capped here too: the browser's maxLength is not
+      // a control a crafted request has to respect.
+      setCol_(['answer'+i, 'q'+i, 'question'+i], safeTrim_(formData['answer'+i] || formData['question'+i] || '').slice(0, 2000));
     }
 
     setCol_(['takeaways','key takeaways','most valuable takeaway'], safeTrim_(formData.takeaways || ''));
@@ -846,9 +985,22 @@ function processCertificateQueue() {
     if (remainingMail < 1) return { status: 'EMAIL_QUOTA_EXHAUSTED', processed: 0 };
 
     var values = sh.getRange(2, 1, sh.getLastRow() - 1, sh.getLastColumn()).getValues();
+    var cRespActivityId = idxOf_(hdr, ['activityid','activity id','id']);
+    var cRespTitle = idxOf_(hdr, ['title of activity','title','activity title','activity']);
+    var disabledActivities = disabledActivityKeys_();
     var queueRows = [];
+    var held = 0;
     for (var i = 0; i < values.length && queueRows.length < Math.min(CERTIFICATE_BATCH_SIZE, remainingMail); i++) {
-      if (safeTrim_(values[i][cStatus]).toUpperCase() === 'PENDING') queueRows.push(i + 2);
+      if (safeTrim_(values[i][cStatus]).toUpperCase() !== 'PENDING') continue;
+      // Rows for a switched-off activity stay PENDING and are picked up again
+      // automatically if it is switched back on.
+      var respId = cRespActivityId >= 0 ? safeTrim_(values[i][cRespActivityId]).toLowerCase() : '';
+      var respTitle = cRespTitle >= 0 ? safeTrim_(values[i][cRespTitle]).toLowerCase() : '';
+      if ((respId && disabledActivities.ids[respId]) || (respTitle && disabledActivities.titles[respTitle])) {
+        held++;
+        continue;
+      }
+      queueRows.push(i + 2);
     }
 
     for (var q = 0; q < queueRows.length; q++) {
@@ -867,7 +1019,7 @@ function processCertificateQueue() {
         failed++;
       }
     }
-    return { status: 'OK', processed: processed, failed: failed, queued: queueRows.length - processed - failed };
+    return { status: 'OK', processed: processed, failed: failed, held: held, queued: queueRows.length - processed - failed };
   } finally {
     try { processorLock.releaseLock(); } catch (_) {}
   }
@@ -1142,13 +1294,19 @@ function _activityRowToObj_(rowValues, rowIndex, cols) {
     signature: safeTrim_(cell(cols.signature)),
     Timestamp: tsOut,
     givenDate: fmtDate_(cell(cols.givenDate)),
-    activityId: safeTrim_(cell(cols.activityId))
+    activityId: safeTrim_(cell(cols.activityId)),
+    createdBy: safeTrim_(cell(cols.createdBy)).toLowerCase(),
+    active: isActiveCellEnabled_(cell(cols.active)),
+    // Mirrors getActivityData's fallback so the admin badge cannot disagree
+    // with what participants actually see.
+    windowOpen: isFeedbackWindowOpen_(fmtDate_(cell(cols.fromDate)) || fmtDate_(cell(cols.date)), fmtDate_(cell(cols.toDate)))
   };
 }
 
 /** GET: list activities for admin table (header-based, column-order safe) */
 function adminGetActivities(adminToken) {
-  if (!isAdminAuthorized_(adminToken)) throw new Error('Forbidden: administrator authorization required.');
+  var session = getAdminSession_(adminToken);
+  if (!session) throw new Error('Forbidden: administrator authorization required.');
 
   var ss = SpreadsheetApp.getActiveSpreadsheet();
   var sh = ss.getSheetByName('Activity');
@@ -1174,13 +1332,24 @@ function adminGetActivities(adminToken) {
     ,region: idxOf_(hdr, ['region','ched region'])
     ,signatoryDesignation: idxOf_(hdr, ['signatory designation','designation'])
     ,signature: idxOf_(hdr, ['e-signature','signature','signature image'])
+    ,createdBy: idxOf_(hdr, ['created by','createdby','owner','creator'])
+    ,active: idxOf_(hdr, ['active','enabled','status'])
+    ,date: idxOf_(hdr, ['date'])
   };
 
   var values = sh.getRange(2, 1, lastRow - 1, lastCol).getValues();
   var out = [];
 
+  // canManage drives whether the UI offers edit / end / delete. Every one of
+  // those endpoints re-checks the same rule, so a crafted request cannot
+  // bypass a disabled button.
+  var actor = safeTrim_(session.email).toLowerCase();
+  var isSuperadmin = safeTrim_(session.role).toLowerCase() === 'superadmin';
+
   for (var i = 0; i < values.length; i++) {
-    out.push(_activityRowToObj_(values[i], i + 2, cols));
+    var obj = _activityRowToObj_(values[i], i + 2, cols);
+    obj.canManage = isSuperadmin || (!!obj.createdBy && obj.createdBy === actor);
+    out.push(obj);
   }
   return out;
 }
@@ -1191,7 +1360,8 @@ function adminGetActivities(adminToken) {
  * - On update, if sheet cell is blank, we also generate and write it.
  */
 function adminSaveActivity(payload, adminToken) {
-  if (!isAdminAuthorized_(adminToken)) throw new Error('Forbidden: administrator authorization required.');
+  var session = getAdminSession_(adminToken);
+  if (!session) throw new Error('Forbidden: administrator authorization required.');
 
   payload = payload || {};
   var title    = safeTrim_(payload.title);
@@ -1218,16 +1388,34 @@ function adminSaveActivity(payload, adminToken) {
   // Ensure we have an ActivityID for new rows or blank ones
   if (!activityId) activityId = makeActivityId_();
 
-  var requiredHeaders = ['Region','Signatory Designation','E-Signature'];
+  var requiredHeaders = ['Region','Signatory Designation','E-Signature','Created By','Active'];
   var hdr = getHeaderMap_(sh);
   requiredHeaders.forEach(function(header){ if(idxOf_(hdr,[header])<0){sh.getRange(1,sh.getLastColumn()+1).setValue(header);hdr=getHeaderMap_(sh);} });
   var lastCol=sh.getLastColumn(), rowValues=new Array(lastCol).fill('');
-  if (isFinite(rowId) && rowId >= 2 && rowId <= sh.getLastRow()) rowValues=sh.getRange(rowId,1,1,lastCol).getValues()[0];
+  if (isFinite(rowId) && rowId >= 2 && rowId <= sh.getLastRow()) {
+    // Editing an existing activity is restricted the same way as ending it.
+    assertCanManageActivity_(sh, rowId, session, 'edit');
+    rowValues=sh.getRange(rowId,1,1,lastCol).getValues()[0];
+  }
   function put(names,value){var col=idxOf_(hdr,names);if(col>=0)rowValues[col]=safeSheetValue_(value);}
   put(['title','activity title','activity'],title); put(['venue','location'],venue); put(['fromdate','from date','start'],fromDate); put(['todate','to date','end'],toDate);
   put(['certificate template','template'],template); put(['focal-in-charge','focal in charge','in-charge','in charge'],inCharge); put(['timestamp','created at','last updated'],new Date());
   put(['given date','date given','givendate','issued','schedule'],givenDate); put(['activityid','activity id','id'],activityId); put(['region','ched region'],region);
   put(['signatory designation','designation'],signatoryDesignation); put(['e-signature','signature','signature image'],signature);
+
+  // Ownership is stamped on create and never reassigned while it is set, since
+  // it is what adminSetActivityStatus checks. Rows predating this column are
+  // blank, so the first administrator to edit one adopts it — harmless, because
+  // any administrator can already delete any activity.
+  var isUpdate = isFinite(rowId) && rowId >= 2 && rowId <= sh.getLastRow();
+  var cCreatedBy = idxOf_(hdr, ['created by','createdby','owner','creator']);
+  if (!isUpdate || (cCreatedBy >= 0 && !safeTrim_(rowValues[cCreatedBy]))) {
+    put(['created by','createdby','owner','creator'], safeTrim_(session.email).toLowerCase());
+  }
+  var cActive = idxOf_(hdr, ['active','enabled','status']);
+  if (!isUpdate || (cActive >= 0 && !safeTrim_(rowValues[cActive]))) {
+    put(['active','enabled','status'], 'TRUE');
+  }
 
   if (isFinite(rowId) && rowId >= 2) {
     // UPDATE existing row
@@ -1240,9 +1428,59 @@ function adminSaveActivity(payload, adminToken) {
   return 'OK';
 }
 
+/**
+ * Switch an activity on or off.
+ *
+ * Off means: it disappears from the participant form, submitFeedback refuses it,
+ * and the certificate queue stops issuing for it. Already-issued certificates
+ * are untouched; responses queued but not yet processed stay PENDING and resume
+ * if it is switched back on.
+ *
+ * Permitted for the administrator named in Created By, or any superadmin.
+ */
+/**
+ * Editing, ending, and deleting an activity are all restricted to the
+ * administrator named in Created By, or any superadmin. Returns the row values
+ * so callers do not have to read the row twice.
+ */
+function assertCanManageActivity_(sh, rowId, session, verb) {
+  var hdr = getHeaderMap_(sh);
+  var row = sh.getRange(rowId, 1, 1, sh.getLastColumn()).getValues()[0];
+  var cCreatedBy = idxOf_(hdr, ['created by','createdby','owner','creator']);
+  var owner = cCreatedBy >= 0 ? safeTrim_(row[cCreatedBy]).toLowerCase() : '';
+  var actor = safeTrim_(session.email).toLowerCase();
+  if (safeTrim_(session.role).toLowerCase() === 'superadmin') return { row: row, hdr: hdr };
+  if (!owner || owner !== actor)
+    throw new Error('Forbidden: only the administrator who created this activity, or a superadmin, can ' + (verb || 'manage') + ' it.');
+  return { row: row, hdr: hdr };
+}
+
+function adminSetActivityStatus(payload, adminToken) {
+  var session = getAdminSession_(adminToken);
+  if (!session) throw new Error('Forbidden: administrator authorization required.');
+
+  payload = payload || {};
+  var rowId = parseInt(String(payload.id || ''), 10);
+  if (!isFinite(rowId) || rowId < 2) throw new Error('Invalid activity row id.');
+  var active = payload.active === true || String(payload.active).toLowerCase() === 'true';
+
+  var sh = SpreadsheetApp.getActiveSpreadsheet().getSheetByName('Activity');
+  if (!sh) throw new Error("Sheet 'Activity' not found.");
+  if (rowId > sh.getLastRow()) throw new Error('Activity does not exist.');
+
+  var managed = assertCanManageActivity_(sh, rowId, session, active ? 'reopen' : 'end');
+  var cActive = idxOf_(managed.hdr, ['active','enabled','status']);
+  if (cActive < 0) throw new Error('Activity sheet is missing the Active column. Run setupParticipantFeedbackSheets().');
+
+  sh.getRange(rowId, cActive + 1).setValue(active ? 'TRUE' : 'FALSE');
+  invalidatePublicCache_();
+  return { id: rowId, active: active };
+}
+
 /** DELETE a row by its sheet row index (the "Row" shown in the table) */
 function adminDeleteActivity(id, adminToken) {
-  if (!isAdminAuthorized_(adminToken)) throw new Error('Forbidden: administrator authorization required.');
+  var session = getAdminSession_(adminToken);
+  if (!session) throw new Error('Forbidden: administrator authorization required.');
   var rowId = parseInt(String(id || ''), 10);
   if (!isFinite(rowId) || rowId < 2) throw new Error('Invalid row id.');
 
@@ -1252,6 +1490,7 @@ function adminDeleteActivity(id, adminToken) {
 
   var lastRow = sh.getLastRow();
   if (rowId > lastRow) throw new Error('Row does not exist.');
+  assertCanManageActivity_(sh, rowId, session, 'delete');
   sh.deleteRow(rowId);
   invalidatePublicCache_();
   return 'OK';
@@ -1399,11 +1638,16 @@ function adminGetFeedbackAnalytics(activityId, adminToken) {
   for (var q=1;q<=15;q++) questionCols.push(idxOf_(hdr,['answer'+q,'q'+q,'question'+q]));
   var questionTotals = new Array(15).fill(0), questionCounts = new Array(15).fill(0), distribution = [0,0,0,0,0];
   var answeredRows = 0, queue = {queued:0,processing:0,issued:0,failed:0};
+  // Long-text answers are not scores: they count toward completion but never
+  // toward averages or the 1-5 distribution.
+  var questionMeta = questionTypesSafe_();
   values.forEach(function(row){
     var answered = 0;
     questionCols.forEach(function(col,index){
-      if(col<0)return; var score=Number(row[col]);
-      if(score>=1&&score<=5){questionTotals[index]+=score;questionCounts[index]++;distribution[Math.round(score)-1]++;answered++;}
+      if(col<0)return;
+      if(safeTrim_(row[col])!=='')answered++;
+      var score=Number(row[col]);
+      if(score>=1&&score<=5&&normalizeQuestionType_(questionMeta['type'+(index+1)])==='rating'){questionTotals[index]+=score;questionCounts[index]++;distribution[Math.round(score)-1]++;}
     });
     if(answered===15)answeredRows++;
     var status=statusCol>=0?safeTrim_(row[statusCol]).toUpperCase():'';
@@ -1411,10 +1655,10 @@ function adminGetFeedbackAnalytics(activityId, adminToken) {
   });
   var totalScore=questionTotals.reduce(function(a,b){return a+b;},0), totalAnswers=questionCounts.reduce(function(a,b){return a+b;},0);
   var average=totalAnswers?Number((totalScore/totalAnswers).toFixed(2)):0;
-  return {scope:activityId||'all',totalResponses:values.length,averageScore:average,overallAverage:overall.averageScore,overallResponses:allValues.length,scoreDelta:Number((average-overall.averageScore).toFixed(2)),completionRate:values.length?Number((answeredRows/values.length*100).toFixed(1)):0,certificateIssueRate:values.length?Number((queue.issued/values.length*100).toFixed(1)):0,positiveRate:totalAnswers?Number(((distribution[3]+distribution[4])/totalAnswers*100).toFixed(1)):0,certificates:queue,distribution:distribution,questions:questionTotals.map(function(total,index){return{label:'Question '+(index+1),average:questionCounts[index]?Number((total/questionCounts[index]).toFixed(2)):0};})};
+  return {scope:activityId||'all',totalResponses:values.length,averageScore:average,overallAverage:overall.averageScore,overallResponses:allValues.length,scoreDelta:Number((average-overall.averageScore).toFixed(2)),completionRate:values.length?Number((answeredRows/values.length*100).toFixed(1)):0,certificateIssueRate:values.length?Number((queue.issued/values.length*100).toFixed(1)):0,positiveRate:totalAnswers?Number(((distribution[3]+distribution[4])/totalAnswers*100).toFixed(1)):0,certificates:queue,distribution:distribution,questions:questionTotals.map(function(total,index){var type=normalizeQuestionType_(questionMeta['type'+(index+1)]);return{label:'Question '+(index+1),type:type,responses:questionCounts[index],average:questionCounts[index]?Number((total/questionCounts[index]).toFixed(2)):0};})};
 }
 
-function computeScoreSummary_(values,hdr){var total=0,count=0;for(var q=1;q<=15;q++){var col=idxOf_(hdr,['answer'+q,'q'+q,'question'+q]);if(col<0)continue;values.forEach(function(row){var score=Number(row[col]);if(score>=1&&score<=5){total+=score;count++;}});}return{averageScore:count?Number((total/count).toFixed(2)):0};}
+function computeScoreSummary_(values,hdr){var total=0,count=0,meta=questionTypesSafe_();for(var q=1;q<=15;q++){var col=idxOf_(hdr,['answer'+q,'q'+q,'question'+q]);if(col<0)continue;if(normalizeQuestionType_(meta['type'+q])!=='rating')continue;values.forEach(function(row){var score=Number(row[col]);if(score>=1&&score<=5){total+=score;count++;}});}return{averageScore:count?Number((total/count).toFixed(2)):0};}
 
 function isAdminAuthorized_(adminToken) { return !!getAdminSession_(adminToken); }
 
@@ -1506,27 +1750,71 @@ function adminGetQuestions(adminToken) {
   requireSuperadmin_(adminToken);
   ensureQuestionsSheet_();
   var data = getQuestions(), out = [];
-  for (var i=1;i<=15;i++) out.push(safeTrim_(data['question'+i]));
+  for (var i=1;i<=15;i++) out.push({ text: safeTrim_(data['question'+i]), type: normalizeQuestionType_(data['type'+i]) });
   return out;
 }
 
 function adminSaveQuestions(questions, adminToken) {
   requireSuperadmin_(adminToken);
   if (!Array.isArray(questions) || questions.length !== 15) throw new Error('Exactly 15 questions are required.');
-  questions = questions.map(function(question){return safeTrim_(question);});
-  if (questions.some(function(question){return !question;})) throw new Error('Questions cannot be blank.');
+  // Accepts [{text, type}] and, for older clients, plain strings.
+  questions = questions.map(function(question){
+    var isObject = question && typeof question === 'object';
+    return {
+      text: safeTrim_(isObject ? question.text : question),
+      type: normalizeQuestionType_(isObject ? question.type : 'rating')
+    };
+  });
+  if (questions.some(function(question){return !question.text;})) throw new Error('Questions cannot be blank.');
+  if (questions.some(function(question){return QUESTION_TYPES.indexOf(question.type) < 0;})) throw new Error('Question type must be rating or text.');
   var sh = ensureQuestionsSheet_(), lock = LockService.getScriptLock();
   if (!lock.tryLock(10000)) throw new Error('Question management is busy. Please try again.');
-  try { sh.getRange(2,1,1,15).setValues([questions.map(safeSheetValue_)]); } finally { lock.releaseLock(); }
+  try {
+    sh.getRange(2,1,1,30).setValues([
+      questions.map(function(question){return safeSheetValue_(question.text);})
+        .concat(questions.map(function(question){return safeSheetValue_(question.type);}))
+    ]);
+  } finally { lock.releaseLock(); }
   invalidatePublicCache_();
   return questions;
+}
+
+/** The two supported answer formats. 'rating' is the existing 1-5 scale. */
+var QUESTION_TYPES = ['rating','text'];
+
+/**
+ * Question types for analytics. Never throws: a missing or unreadable
+ * Questions sheet must not take down the whole dashboard, so it falls back to
+ * treating every question as a rating.
+ */
+function questionTypesSafe_() {
+  try {
+    return getQuestions();
+  } catch (ignored) {
+    var out = {};
+    for (var i = 1; i <= 15; i++) out['type' + i] = 'rating';
+    return out;
+  }
+}
+
+function normalizeQuestionType_(value) {
+  var raw = safeTrim_(value).toLowerCase();
+  if (raw === 'text' || raw === 'long text' || raw === 'longtext' || raw === 'essay') return 'text';
+  return 'rating';
 }
 
 function ensureQuestionsSheet_() {
   var ss = SpreadsheetApp.getActiveSpreadsheet(), sh = ss.getSheetByName('Questions');
   if (!sh) sh = ss.insertSheet('Questions');
-  var headers=[];for(var i=1;i<=15;i++)headers.push('question'+i);
-  sh.getRange(1,1,1,15).setValues([headers]);
+  // A new sheet has 26 columns, and older Questions sheets have 15. Writing a
+  // 30-column range without widening first throws "dimensions of the range
+  // are invalid".
+  var maxColumns = sh.getMaxColumns();
+  if (maxColumns < 30) sh.insertColumnsAfter(maxColumns, 30 - maxColumns);
+  var headers=[];
+  for(var i=1;i<=15;i++)headers.push('question'+i);
+  for(var t=1;t<=15;t++)headers.push('type'+t);
+  sh.getRange(1,1,1,30).setValues([headers]);
   return sh;
 }
 
@@ -1606,3 +1894,149 @@ function adminSessionKey_(token){var secret=PropertiesService.getScriptPropertie
 function adminLoginThrottleKey_(email){var digest=Utilities.computeDigest(Utilities.DigestAlgorithm.SHA_256,String(email||'unknown'),Utilities.Charset.UTF_8);return'LOGIN_ATTEMPTS_'+Utilities.base64EncodeWebSafe(digest).replace(/=+$/,'').slice(0,32);}
 function hashAdminPassword_(password,salt){var value=String(salt||'')+'|'+String(password||'');for(var i=0;i<12000;i++){var digest=Utilities.computeDigest(Utilities.DigestAlgorithm.SHA_256,value,Utilities.Charset.UTF_8);value=Utilities.base64EncodeWebSafe(digest);}return value;}
 function constantTimeEquals_(a,b){a=String(a||'');b=String(b||'');var diff=a.length^b.length,len=Math.max(a.length,b.length);for(var i=0;i<len;i++)diff|=(a.charCodeAt(i%Math.max(1,a.length))||0)^(b.charCodeAt(i%Math.max(1,b.length))||0);return diff===0;}
+
+// =====================================================================
+// Staging cleanup — remove test data before going live
+//
+// Deliberately NOT routed through doPost. These functions are run by hand
+// from the Apps Script editor, so no HTTP request can ever trigger them.
+//
+// Usage:
+//   1. previewTestingDataReset()  → counts only, changes nothing
+//   2. resetTestingData(RESET_CONFIRMATION_PHRASE)          → default scope
+//      resetTestingData(RESET_CONFIRMATION_PHRASE, {...})   → custom scope
+//
+// Never touched: Users/Whitelist (you would lock yourself out), Questions,
+// the Activity sheet unless you opt in, and the security secrets.
+// =====================================================================
+
+var RESET_CONFIRMATION_PHRASE = 'RESET PARTICIPANT FEEDBACK TEST DATA';
+
+/** Rows below the header, or 0 for an empty/missing sheet. */
+function dataRowCount_(sheetName) {
+  var sh = SpreadsheetApp.getActiveSpreadsheet().getSheetByName(sheetName);
+  if (!sh) return 0;
+  return Math.max(0, sh.getLastRow() - 1);
+}
+
+function clearSheetRows_(sheetName) {
+  var sh = SpreadsheetApp.getActiveSpreadsheet().getSheetByName(sheetName);
+  if (!sh) return 0;
+  var rows = sh.getLastRow() - 1;
+  if (rows < 1) return 0;
+  sh.deleteRows(2, rows);
+  return rows;
+}
+
+/** Count of files in the generated-certificates folder. */
+function certificateFileCount_() {
+  try {
+    var files = DriveApp.getFolderById(CERTIFICATES_FOLDER_ID).getFiles(), n = 0;
+    while (files.hasNext()) { files.next(); n++; }
+    return n;
+  } catch (error) {
+    return -1; // folder missing or inaccessible
+  }
+}
+
+/**
+ * Read-only. Run this first and read it carefully — it is exactly what
+ * resetTestingData() will remove.
+ */
+function previewTestingDataReset() {
+  var properties = PropertiesService.getScriptProperties().getProperties();
+  var sessions = Object.keys(properties).filter(function(key){ return key.indexOf('ADMIN_SESSION_') === 0; }).length;
+  var summary = {
+    mode: 'PREVIEW — nothing has been changed',
+    responses: dataRowCount_('Responses'),
+    activities: dataRowCount_('Activity'),
+    auditEntries: dataRowCount_('Audit'),
+    certificateFiles: certificateFileCount_(),
+    adminSessions: sessions,
+    defaultScope: 'responses + certificates + sessions (activities and audit log are kept unless you opt in)',
+    toProceed: "resetTestingData('" + RESET_CONFIRMATION_PHRASE + "')"
+  };
+  Logger.log(JSON.stringify(summary, null, 2));
+  return summary;
+}
+
+/**
+ * Delete staging data. Requires the exact confirmation phrase.
+ *
+ * options (all optional):
+ *   responses    default true   clear every row of the Responses sheet
+ *   certificates default true   move generated certificate PDFs to Drive trash
+ *   sessions     default true   sign out every administrator
+ *   activities   default false  clear the Activity sheet as well
+ *   auditLog     default false  clear the Audit sheet and reset its hash chain
+ *
+ * Certificates are trashed, not purged, so Drive's trash is a 30-day undo.
+ */
+function resetTestingData(confirmation, options) {
+  if (safeTrim_(confirmation) !== RESET_CONFIRMATION_PHRASE)
+    throw new Error(
+      'Refusing to delete anything. Run previewTestingDataReset() first, then call ' +
+      "resetTestingData('" + RESET_CONFIRMATION_PHRASE + "')."
+    );
+
+  options = options || {};
+  var doResponses = options.responses !== false;
+  var doCertificates = options.certificates !== false;
+  var doSessions = options.sessions !== false;
+  var doActivities = options.activities === true;
+  var doAuditLog = options.auditLog === true;
+
+  var lock = LockService.getScriptLock();
+  if (!lock.tryLock(30000)) throw new Error('The script is busy. Try again in a moment.');
+
+  var result = { startedAt: new Date().toISOString(), responses: 0, activities: 0, auditEntries: 0, certificatesTrashed: 0, certificatesRemaining: 0, adminSessions: 0 };
+  try {
+    if (doResponses) result.responses = clearSheetRows_('Responses');
+    if (doActivities) result.activities = clearSheetRows_('Activity');
+
+    if (doCertificates) {
+      try {
+        var startedAt = Date.now();
+        var files = DriveApp.getFolderById(CERTIFICATES_FOLDER_ID).getFiles();
+        while (files.hasNext()) {
+          if (Date.now() - startedAt > CERTIFICATE_RUN_BUDGET_MS) {
+            // Ran out of execution time; report what is left and run again.
+            while (files.hasNext()) { files.next(); result.certificatesRemaining++; }
+            break;
+          }
+          files.next().setTrashed(true);
+          result.certificatesTrashed++;
+        }
+      } catch (driveError) {
+        result.certificateError = String(driveError.message || driveError);
+      }
+    }
+
+    var properties = PropertiesService.getScriptProperties();
+    if (doSessions) {
+      var sessionKeys = Object.keys(properties.getProperties()).filter(function(key){
+        return key.indexOf('ADMIN_SESSION_') === 0;
+      });
+      sessionKeys.forEach(function(key){ properties.deleteProperty(key); });
+      if (sessionKeys.length) CacheService.getScriptCache().removeAll(sessionKeys);
+      result.adminSessions = sessionKeys.length;
+    }
+
+    if (doAuditLog) {
+      result.auditEntries = clearSheetRows_('Audit');
+      // The chain head must go too, or adminGetAuditLog reports tampering
+      // because the stored head no longer matches an empty sheet.
+      properties.deleteProperty('AUDIT_HEAD_HASH');
+    }
+
+    invalidatePublicCache_();
+    result.finishedAt = new Date().toISOString();
+    result.note = result.certificatesRemaining
+      ? 'Execution time ran out. Run resetTestingData again to trash the remaining certificates.'
+      : 'Done. Certificates are in Drive trash and recoverable for 30 days.';
+    Logger.log(JSON.stringify(result, null, 2));
+    return result;
+  } finally {
+    try { lock.releaseLock(); } catch (ignored) {}
+  }
+}

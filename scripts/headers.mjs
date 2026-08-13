@@ -21,14 +21,28 @@ const source = join(root, "config", "_headers");
 const target = join(root, "dist", "_headers");
 const mode = process.argv[2];
 
+// `netlify dev` serves dist/_headers even when it proxies to Vite, and it
+// re-reads the file, so a local `npm run build` mid-session would blank the
+// dev server. Emit only on real deploy builds (Netlify and CI set these), or
+// when forced via `npm run build:prod`.
+const isDeployBuild =
+  process.env.NETLIFY === "true" || process.env.CI === "true";
+const forced = process.argv.includes("--force");
+
 if (mode === "emit") {
   if (!existsSync(source)) {
     console.error(`headers: missing ${source} — production would deploy with no CSP.`);
     process.exit(1);
   }
-  mkdirSync(dirname(target), { recursive: true });
-  copyFileSync(source, target);
-  console.log("headers: wrote dist/_headers");
+  if (!isDeployBuild && !forced) {
+    console.log(
+      "headers: local build — skipped dist/_headers so `netlify dev` keeps working. Use `npm run build:prod` to include it.",
+    );
+  } else {
+    mkdirSync(dirname(target), { recursive: true });
+    copyFileSync(source, target);
+    console.log("headers: wrote dist/_headers");
+  }
 } else if (mode === "clean") {
   rmSync(target, { force: true });
   console.log("headers: removed dist/_headers for local development");

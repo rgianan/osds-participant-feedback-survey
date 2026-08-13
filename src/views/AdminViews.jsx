@@ -21,6 +21,7 @@ import {
   adminLogin,
   adminLogout,
   deleteActivity,
+  setActivityStatus,
   getAdminActivities,
   getAdminAuditLog,
   getAdminQuestions,
@@ -33,6 +34,9 @@ import {
   uploadSignature,
 } from "../lib/api";
 import { Brand, TurnstileWidget } from "./shared";
+
+const NOT_OWNER_HINT =
+  "Only the administrator who created this activity, or a superadmin, can edit, end, or delete it.";
 
 function AdminLogin({ onAuthenticated }) {
   const [email, setEmail] = useState("");
@@ -166,6 +170,28 @@ export function AdminDashboard() {
       setAdminError(deleteError.message || "Unable to delete the activity.");
     }
   }
+  async function toggleActive(row) {
+    const next = !row.active;
+    if (
+      !next &&
+      !confirm(
+        `End "${row.title}"?\n\nThe feedback form will hide it and certificate generation will stop. Queued responses resume if you reopen it.`,
+      )
+    )
+      return;
+    setAdminError("");
+    try {
+      await setActivityStatus(row.id, next);
+      setRows((x) =>
+        x.map((r) => (r.id === row.id ? { ...r, active: next } : r)),
+      );
+      setToast(next ? "Activity reopened" : "Activity ended");
+    } catch (statusError) {
+      setAdminError(
+        statusError.message || "Unable to change the activity status.",
+      );
+    }
+  }
   async function signOut() {
     try {
       await adminLogout();
@@ -187,7 +213,7 @@ export function AdminDashboard() {
     users: ["Users", "Create and maintain administrator access."],
     questions: [
       "Survey questions",
-      "Edit the 15 participant rating questions.",
+      "Edit the 15 participant questions and their answer types.",
     ],
     audit: ["Audit log", "Review administrator access and privileged changes."],
   }[tab] || ["Activities", "Manage the certificate portal."];
@@ -347,6 +373,7 @@ export function AdminDashboard() {
                       <th>Schedule</th>
                       <th>Venue</th>
                       <th>Signatory</th>
+                      <th>Feedback</th>
                       <th></th>
                     </tr>
                   </thead>
@@ -365,9 +392,43 @@ export function AdminDashboard() {
                           <small>{r.signatoryDesignation}</small>
                         </td>
                         <td>
+                          <span
+                            className={`badge${r.active ? "" : " badge-off"}`}
+                            title={
+                              r.active
+                                ? r.windowOpen
+                                  ? "Open: participants can submit feedback now."
+                                  : "Switched on, but today is outside the activity dates."
+                                : "Closed: hidden from participants and certificate generation is stopped."
+                            }
+                          >
+                            {!r.active
+                              ? "Closed"
+                              : r.windowOpen
+                                ? "Open"
+                                : "Scheduled"}
+                          </span>
+                        </td>
+                        <td>
                           <div className="row-actions">
                             <button
-                              title={`Edit ${r.title}`}
+                              disabled={!r.canManage}
+                              title={
+                                r.canManage
+                                  ? r.active
+                                    ? `End ${r.title}`
+                                    : `Reopen ${r.title}`
+                                  : NOT_OWNER_HINT
+                              }
+                              onClick={() => toggleActive(r)}
+                            >
+                              {r.active ? "End" : "Reopen"}
+                            </button>
+                            <button
+                              disabled={!r.canManage}
+                              title={
+                                r.canManage ? `Edit ${r.title}` : NOT_OWNER_HINT
+                              }
                               onClick={() => {
                                 setEditing(r);
                                 setModal(true);
@@ -377,8 +438,13 @@ export function AdminDashboard() {
                             </button>
                             <button
                               className="danger"
+                              disabled={!r.canManage}
                               aria-label={`Delete ${r.title}`}
-                              title={`Delete ${r.title}`}
+                              title={
+                                r.canManage
+                                  ? `Delete ${r.title}`
+                                  : NOT_OWNER_HINT
+                              }
                               onClick={() => remove(r.id)}
                             >
                               <Trash2 />
@@ -594,7 +660,9 @@ function UsersPanel() {
 }
 
 function QuestionsPanel() {
-  const [questions, setQuestions] = useState(Array(15).fill("")),
+  const [questions, setQuestions] = useState(
+    Array.from({ length: 15 }, () => ({ text: "", type: "rating" })),
+  ),
     [loading, setLoading] = useState(true),
     [saving, setSaving] = useState(false),
     [message, setMessage] = useState(""),
@@ -627,9 +695,10 @@ function QuestionsPanel() {
     <form className="management-card questions-form" onSubmit={save}>
       <div className="management-heading">
         <div>
-          <h2>Participant rating questions</h2>
+          <h2>Participant survey questions</h2>
           <p>
-            Changes apply to new survey responses. The rating scale remains 1–5.
+            Changes apply to new survey responses. Choose an answer type per
+            question: a 1–5 multiple option, or a long text reply.
           </p>
         </div>
         <button
@@ -643,23 +712,35 @@ function QuestionsPanel() {
       {error && <div className="alert">{error}</div>}
       {message && <div className="notice">{message}</div>}
       <div className="question-editor">
-        {questions.map((question, index) => (
-          <label key={index}>
-            <span>{index + 1}</span>
-            <textarea
-              required
-              value={question}
-              onChange={(e) =>
-                setQuestions(
-                  questions.map((item, i) =>
-                    i === index ? e.target.value : item,
-                  ),
-                )
-              }
-              aria-label={`Question ${index + 1}`}
-            />
-          </label>
-        ))}
+        {questions.map((question, index) => {
+          const patch = (changes) =>
+            setQuestions(
+              questions.map((item, i) =>
+                i === index ? { ...item, ...changes } : item,
+              ),
+            );
+          return (
+            <label key={index}>
+              <span>{index + 1}</span>
+              <textarea
+                required
+                value={question.text}
+                onChange={(e) => patch({ text: e.target.value })}
+                aria-label={`Question ${index + 1}`}
+              />
+              <select
+                className="question-type"
+                value={question.type}
+                onChange={(e) => patch({ type: e.target.value })}
+                aria-label={`Answer type for question ${index + 1}`}
+                title="Multiple option asks for a 1-5 rating. Long text asks for a written answer."
+              >
+                <option value="rating">Multiple option (1-5)</option>
+                <option value="text">Long text</option>
+              </select>
+            </label>
+          );
+        })}
       </div>
     </form>
   );
@@ -985,10 +1066,26 @@ function AnalyticsPanel({ data, activities, activityFilter, onFilter }) {
             {data.questions.map((question, index) => (
               <div key={index}>
                 <span>Q{index + 1}</span>
-                <i>
-                  <b style={{ width: `${(question.average / 5) * 100}%` }} />
-                </i>
-                <strong>{Number(question.average).toFixed(2)}</strong>
+                {question.type === "text" ? (
+                  // Long-text questions have no score; 0.00 would read as a
+                  // terrible rating rather than "not applicable".
+                  <>
+                    <i />
+                    <strong
+                      className="muted-score"
+                      title="Long text question — written answers are in the Responses sheet."
+                    >
+                      Text
+                    </strong>
+                  </>
+                ) : (
+                  <>
+                    <i>
+                      <b style={{ width: `${(question.average / 5) * 100}%` }} />
+                    </i>
+                    <strong>{Number(question.average).toFixed(2)}</strong>
+                  </>
+                )}
               </div>
             ))}
           </div>

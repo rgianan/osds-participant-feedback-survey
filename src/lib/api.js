@@ -71,7 +71,7 @@ export const demoQuestions = [
   "I would recommend this activity to colleagues.",
   "Overall, how satisfied are you with the activity?",
   "How likely are you to attend a similar activity?",
-];
+].map((text) => ({ text, type: "rating" }));
 
 function gasRun(method, ...args) {
   return new Promise((resolve, reject) => {
@@ -140,10 +140,12 @@ export async function getQuestions() {
   const q = window.google?.script
     ? await gasRun("getQuestions")
     : await remote("getQuestions");
-  const questions = Array.from({ length: 15 }, (_, i) =>
-    String(q[`question${i + 1}`] || "").trim(),
-  );
-  if (questions.some((question) => !question))
+  // Each entry is {text, type}; type is "rating" (1-5 scale) or "text".
+  const questions = Array.from({ length: 15 }, (_, i) => ({
+    text: String(q[`question${i + 1}`] || "").trim(),
+    type: q[`type${i + 1}`] === "text" ? "text" : "rating",
+  }));
+  if (questions.some((question) => !question.text))
     throw new Error(
       "The survey questions are not configured. Ask a superadmin to complete the Questions module.",
     );
@@ -173,6 +175,10 @@ export async function getAdminActivities() {
     signatoryDesignation: i ? "Regional Director" : "Executive Director",
     signature: "Sample e-signature.png",
     template: "Certificate Template.pptx",
+    active: true,
+    windowOpen: true,
+    canManage: true,
+    createdBy: "host@example.com",
   }));
 }
 export async function saveActivity(payload) {
@@ -182,6 +188,18 @@ export async function saveActivity(payload) {
     return remote("adminSaveActivity", { payload, adminToken: adminToken() });
   if (!DEMO_MODE) requireBackend();
   return payload;
+}
+export async function setActivityStatus(id, active) {
+  const payload = { id, active };
+  if (window.google?.script)
+    return gasRun("adminSetActivityStatus", payload, adminToken());
+  if (HAS_REMOTE)
+    return remote("adminSetActivityStatus", {
+      payload,
+      adminToken: adminToken(),
+    });
+  if (!DEMO_MODE) requireBackend();
+  return { id, active };
 }
 export async function deleteActivity(id) {
   if (window.google?.script)

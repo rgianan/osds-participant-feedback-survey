@@ -1,5 +1,8 @@
 [build]
-  command = "npm run build"
+  # build:prod forces dist/_headers to be written. Plain `npm run build` skips
+  # it locally, because `netlify dev` reads that file and its CSP blocks Vite's
+  # inline React Refresh preamble, blanking the dev server.
+  command = "npm run build:prod"
   publish = "dist"
 
 [functions]

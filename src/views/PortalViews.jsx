@@ -78,12 +78,14 @@ export function PublicForm() {
     [done, setDone] = useState(null),
     [error, setError] = useState(""),
     [turnstileToken, setTurnstileToken] = useState(""),
-    [turnstileReset, setTurnstileReset] = useState(0);
+    [turnstileReset, setTurnstileReset] = useState(0),
+    [loaded, setLoaded] = useState(false);
   useEffect(() => {
     Promise.all([getActivities(), getQuestions()])
       .then(([a, q]) => {
         setActivities(a);
         setQuestions(q);
+        setLoaded(true);
       })
       .catch((loadError) =>
         setError(loadError.message || "Unable to load the survey."),
@@ -91,6 +93,8 @@ export function PublicForm() {
   }, []);
   const activity = activities.find((a) => a.id === form.activityId);
   const update = (key, value) => setForm((f) => ({ ...f, [key]: value }));
+  // A rating answer is 1-5; a long-text answer is any non-blank string.
+  const answered = (i) => String(ratings[i] ?? "").trim() !== "";
   const valid = useMemo(
     () =>
       step === 0
@@ -101,10 +105,10 @@ export function PublicForm() {
           Number(form.age) <= 120 &&
           form.activityId
         : step === 1
-          ? [0, 1, 2, 3, 4].every((i) => ratings[i])
+          ? [0, 1, 2, 3, 4].every(answered)
           : step === 2
-            ? [5, 6, 7, 8, 9].every((i) => ratings[i])
-            : [10, 11, 12, 13, 14].every((i) => ratings[i]),
+            ? [5, 6, 7, 8, 9].every(answered)
+            : [10, 11, 12, 13, 14].every(answered),
     [step, form, ratings],
   );
   async function next() {
@@ -135,6 +139,15 @@ export function PublicForm() {
       );
       if (res.status === "BAD_REQUEST")
         throw new Error(res.message || "Please check your response.");
+      if (res.status === "CLOSED") {
+        // The activity closed, or its dates passed, while this form was open.
+        setActivities((list) => list.filter((a) => a.id !== form.activityId));
+        setForm((f) => ({ ...f, activityId: "" }));
+        setStep(0);
+        throw new Error(
+          res.message || "This activity is no longer accepting feedback.",
+        );
+      }
       if (res.status === "DUP")
         throw new Error(
           "A response for this activity already exists for this participant.",
@@ -336,6 +349,12 @@ export function PublicForm() {
                     </select>
                     <ChevronDown />
                   </div>
+                  {loaded && !activities.length && (
+                    <small>
+                      No activity is open for feedback today. The form opens on
+                      the activity dates set by the organizer.
+                    </small>
+                  )}
                 </label>
                 {activity && (
                   <div className="activity-preview">
@@ -365,16 +384,30 @@ export function PublicForm() {
                       }
                     </h2>
                     <p>
-                      Select the response that best represents your experience.
+                      Answer every question below before continuing.
                     </p>
                   </div>
                 </div>
                 {questions.slice(...groups).map((q, j) => {
                   const idx = groups[0] + j;
+                  if (q.type === "text")
+                    return (
+                      <label key={idx} className="question-text">
+                        {`${idx + 1}. ${q.text}`}
+                        <textarea
+                          value={ratings[idx] ?? ""}
+                          maxLength={2000}
+                          placeholder="Type your answer"
+                          onChange={(e) =>
+                            setRatings((r) => ({ ...r, [idx]: e.target.value }))
+                          }
+                        />
+                      </label>
+                    );
                   return (
                     <Rating
                       key={idx}
-                      label={`${idx + 1}. ${q}`}
+                      label={`${idx + 1}. ${q.text}`}
                       value={ratings[idx]}
                       onChange={(v) => setRatings((r) => ({ ...r, [idx]: v }))}
                     />
