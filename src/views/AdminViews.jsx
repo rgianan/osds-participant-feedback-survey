@@ -1095,23 +1095,28 @@ function AnalyticsPanel({ data, activities, activityFilter, onFilter }) {
   );
 }
 
+// CHED regional offices. These strings are written to the Activity sheet's
+// Region column and printed on certificates, so edit them with care: activities
+// saved under an older label keep that label until they are edited.
 const REGIONS = [
-  "NCR",
-  "CAR",
-  "Region 1",
-  "Region 2",
-  "Region 3",
-  "Region 4A",
+  "National Capital Region",
+  "01 – Ilocos Region",
+  "02 – Cagayan Valley",
+  "03 – Central Luzon",
+  "04 – CALABARZON",
+  "05 – Bicol Region",
+  "06 – Western Visayas",
+  "07 – Central Visayas",
+  "08 – Eastern Visayas",
+  "09 – Zamboanga Peninsula",
+  "10 – Northern Mindanao",
+  "11 – Davao Region",
+  "12 – Soccsksargen",
+  "Caraga",
+  "Cordillera Administrative Region",
+  "Bangsamoro Autonomous Region in Muslim Mindanao",
   "MIMAROPA",
-  "Region 5",
-  "Region 6",
-  "Region 7",
-  "Region 8",
-  "Region 9",
-  "Region 10",
-  "Region 11",
-  "Region 12",
-  "Region 13",
+  "Negros Island Region",
 ];
 function ActivityModal({ activity, activities, onClose, onSaved }) {
   const empty = {
@@ -1168,6 +1173,31 @@ function ActivityModal({ activity, activities, onClose, onSaved }) {
   }
   async function submit(e) {
     e.preventDefault();
+    // The e-signature and template are not plain inputs, so the browser's own
+    // `required` handling cannot catch them. Name what is missing instead of
+    // letting the server return a generic "fill all required fields".
+    const missing = [
+      ["title", "Activity title"],
+      ["region", "Region"],
+      ["venue", "Venue"],
+      ["fromDate", "Start date"],
+      ["inCharge", "Signatory name"],
+      ["signatoryDesignation", "Signatory designation"],
+      ["signature", "E-signature image"],
+      ["template", "Certificate template"],
+    ]
+      .filter(([key]) => !String(form[key] ?? "").trim())
+      .map(([, label]) => label);
+    if (missing.length) {
+      setError(
+        `Still needed: ${missing.join(", ")}.${
+          missing.includes("E-signature image")
+            ? " Upload a signature image, or pick a previous signatory to reuse one."
+            : ""
+        }`,
+      );
+      return;
+    }
     setBusy(true);
     setError("");
     try {
