@@ -7,6 +7,8 @@ const REMOTE_URL = USE_NETLIFY_PROXY
 const HAS_REMOTE = Boolean(REMOTE_URL);
 const DEMO_MODE =
   import.meta.env.DEV && import.meta.env.VITE_ENABLE_DEMO_MODE === "true";
+// Answer formats, mirroring QUESTION_TYPES in Code.gs. Keep the two in step.
+export const QUESTION_TYPES = ["rating", "text", "yesno"];
 const SESSION_KEY = "participant_feedback_admin_session";
 const adminToken = () => {
   try {
@@ -140,11 +142,16 @@ export async function getQuestions() {
   const q = window.google?.script
     ? await gasRun("getQuestions")
     : await remote("getQuestions");
-  // Each entry is {text, type}; type is "rating" (1-5 scale) or "text".
-  const questions = Array.from({ length: 15 }, (_, i) => ({
-    text: String(q[`question${i + 1}`] || "").trim(),
-    type: q[`type${i + 1}`] === "text" ? "text" : "rating",
-  }));
+  // Each entry is {text, type}. Anything unrecognized falls back to the 1-5
+  // scale, but every supported type must be listed here: a type missing from
+  // this set is silently downgraded and the question renders as the wrong kind.
+  const questions = Array.from({ length: 15 }, (_, i) => {
+    const type = String(q[`type${i + 1}`] || "").toLowerCase();
+    return {
+      text: String(q[`question${i + 1}`] || "").trim(),
+      type: QUESTION_TYPES.includes(type) ? type : "rating",
+    };
+  });
   if (questions.some((question) => !question.text))
     throw new Error(
       "The survey questions are not configured. Ask a superadmin to complete the Questions module.",

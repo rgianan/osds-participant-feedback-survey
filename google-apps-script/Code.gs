@@ -459,10 +459,33 @@ function auditActionLabel_(action) { return {adminLogin:'LOGIN',adminLogout:'LOG
 
 function ensureAuditSheet_() {
   var ss=SpreadsheetApp.getActiveSpreadsheet(),sh=ss.getSheetByName('Audit');
-  if(sh)return sh;
-  return ensureSetupSheet_(ss,'Audit',[
-    setupColumn_('timestamp'),setupColumn_('audit_id'),setupColumn_('actor_email'),setupColumn_('actor_role'),setupColumn_('action'),setupColumn_('target_type'),setupColumn_('target_id'),setupColumn_('outcome'),setupColumn_('details'),setupColumn_('request_id'),setupColumn_('previous_hash'),setupColumn_('entry_hash')
-  ]).sheet;
+  if(!sh){
+    sh=ensureSetupSheet_(ss,'Audit',[
+      setupColumn_('timestamp'),setupColumn_('audit_id'),setupColumn_('actor_email'),setupColumn_('actor_role'),setupColumn_('action'),setupColumn_('target_type'),setupColumn_('target_id'),setupColumn_('outcome'),setupColumn_('details'),setupColumn_('request_id'),setupColumn_('previous_hash'),setupColumn_('entry_hash')
+    ]).sheet;
+  }
+  forceAuditTimestampAsText_(sh);
+  return sh;
+}
+
+/**
+ * The timestamp is hashed as the literal string "yyyy-MM-dd HH:mm:ss", but
+ * Sheets silently coerces that into a datetime and getDisplayValues() then
+ * re-renders it — dropping the leading zero on hours below 10. The row's HMAC
+ * no longer matches its own stored text, so the chain reports tampering that
+ * never happened. Pinning the column to plain text keeps what was hashed.
+ */
+function forceAuditTimestampAsText_(sheet) {
+  try {
+    var col = idxOf_(getHeaderMap_(sheet), ['timestamp']);
+    if (col < 0) return;
+    // Sample a data row, not the header: a multi-cell getNumberFormat() reports
+    // the top-left cell, and a text-formatted header would make this skip the
+    // fix while every data row stayed a coerced date.
+    var probeRow = sheet.getLastRow() >= 2 ? 2 : 1;
+    if (sheet.getRange(probeRow, col + 1).getNumberFormat() === '@') return;
+    sheet.getRange(1, col + 1, sheet.getMaxRows()).setNumberFormat('@');
+  } catch (ignored) {}
 }
 
 function auditCanonical_(entry) { return [entry.timestamp,entry.audit_id,entry.actor_email,entry.actor_role,entry.action,entry.target_type,entry.target_id,entry.outcome,entry.details,entry.request_id,entry.previous_hash].map(safeTrim_).join('|'); }
@@ -1186,15 +1209,17 @@ function sendCertificateForResponse_(responsesRowIndex) {
 
   // --- Replace placeholders ---
   var pres = SlidesApp.openById(slidesId);
+  // Unconditional: a guarded replace leaves a literal "{{Venue}}" printed on
+  // the certificate whenever the field happens to be empty.
   pres.replaceAllText('{{Name}}', name);
   pres.replaceAllText('{{Title}}', aTitle);
-  if (aVenue) pres.replaceAllText('{{Venue}}', aVenue);
-  if (aDate)  pres.replaceAllText('{{Date}}', aDate);
-  if (aFrom)  pres.replaceAllText('{{FromDate}}', aFrom);
-  if (aTo)    pres.replaceAllText('{{ToDate}}', aTo);
-  if (aGiven) pres.replaceAllText('{{GivenDate}}', aGiven);
-  if (aSignatory) pres.replaceAllText('{{Signatory}}', aSignatory);
-  if (aDesignation) pres.replaceAllText('{{Designation}}', aDesignation);
+  pres.replaceAllText('{{Venue}}', aVenue);
+  pres.replaceAllText('{{Date}}', aDate);
+  pres.replaceAllText('{{FromDate}}', aFrom);
+  pres.replaceAllText('{{ToDate}}', aTo);
+  pres.replaceAllText('{{GivenDate}}', aGiven);
+  pres.replaceAllText('{{Signatory}}', aSignatory);
+  pres.replaceAllText('{{Designation}}', aDesignation);
   if (aSignature) replaceSignaturePlaceholder_(pres, aSignature);
   pres.replaceAllText('{{VerificationCode}}', verification.code);
   pres.replaceAllText('{{VerificationUrl}}', verification.url);
@@ -1206,12 +1231,22 @@ function sendCertificateForResponse_(responsesRowIndex) {
   pdfBlob.setName('Certificate - ' + name + ' - ' + aTitle + '.pdf');
 
   var pdfFile = certFolder.createFile(pdfBlob);
+  var sharingWarning = '';
   try {
     // Choose policy: ANYONE_WITH_LINK or DOMAIN_WITH_LINK
     pdfFile.setSharing(DriveApp.Access.ANYONE_WITH_LINK, DriveApp.Permission.VIEW);
     // pdfFile.setSharing(DriveApp.Access.DOMAIN_WITH_LINK, DriveApp.Permission.VIEW);
-  } catch (_){}
+  } catch (sharingError){
+    // A Workspace policy can forbid link sharing. The email would then carry a
+    // link the recipient cannot open, so record it instead of failing silently.
+    sharingWarning = ' (link sharing blocked: ' + String(sharingError && sharingError.message || sharingError).slice(0, 120) + ')';
+  }
   var certUrl = pdfFile.getUrl();
+
+  // The editable Slides copy was only an intermediate step. Left behind, every
+  // certificate would leave a second, modifiable file in the certificates
+  // folder carrying the participant's name.
+  try { DriveApp.getFileById(slidesId).setTrashed(true); } catch (cleanupError) {}
 
   // --- Email link (no attachment) ---
   var emailStatus = '';
@@ -1239,32 +1274,84 @@ function sendCertificateForResponse_(responsesRowIndex) {
       name: 'Certificates'
     });
 
-    emailStatus = sentAt;
+    emailStatus = sentAt + sharingWarning;
   } else {
-    emailStatus = 'No recipient email';
+    emailStatus = 'No recipient email' + sharingWarning;
   }
 
   return { certificateUrl: certUrl, emailStatus: emailStatus };
 }
 
-function replaceSignaturePlaceholder_(presentation, signatureUrl) {
-  var signature = parseAndAssertFile_(signatureUrl, 'E-signature').file.getBlob();
+/**
+ * Swap a text placeholder for an image WITHOUT destroying the rest of the text.
+ *
+ * The previous version called shape.remove() on any shape containing the token,
+ * which deleted the whole text box. In a template where {{Signature}} shares a
+ * box with {{Signatory}} and {{Designation}} — or {{QRCode}} shares one with
+ * {{VerificationCode}} — that silently erased every one of those lines from the
+ * finished certificate.
+ *
+ * Only a shape whose entire text IS the placeholder is safe to remove. In that
+ * case the image takes the shape's exact rectangle, which is the arrangement
+ * that gives correct placement. Otherwise the token alone is stripped and the
+ * image is anchored at the token's estimated line, leaving surrounding text
+ * intact.
+ */
+function replaceImagePlaceholder_(presentation, token, blob, options) {
+  options = options || {};
+  var placed = false;
   presentation.getSlides().forEach(function(slide){
     slide.getShapes().forEach(function(shape){
       try {
-        if(shape.getText().asString().indexOf('{{Signature}}')<0)return;
-        var left=shape.getLeft(),top=shape.getTop(),width=shape.getWidth(),height=shape.getHeight();
-        shape.remove(); slide.insertImage(signature,left,top,width,height);
-      } catch (_) {}
+        var text = shape.getText().asString();
+        if (text.indexOf(token) < 0) return;
+
+        var left = shape.getLeft(), top = shape.getTop();
+        var width = shape.getWidth(), height = shape.getHeight();
+
+        if (safeTrim_(text) === token) {
+          // The placeholder owns the whole box: exact placement.
+          shape.remove();
+          slide.insertImage(blob, left, top, width, height);
+          placed = true;
+          return;
+        }
+
+        // Mixed box: keep the text, estimate where the token's line sits.
+        var lines = text.split(String.fromCharCode(10));
+        var lineIndex = 0;
+        for (var i = 0; i < lines.length; i++) { if (lines[i].indexOf(token) >= 0) { lineIndex = i; break; } }
+        var lineHeight = height / Math.max(1, lines.length);
+        var imageHeight = Math.max(lineHeight, height * (options.heightRatio || 0.25));
+        var imageWidth = width * (options.widthRatio || 0.35);
+        var imageLeft = left + (options.align === 'left' ? 0 : (width - imageWidth) / 2);
+        var imageTop = top + (lineIndex * lineHeight) - (imageHeight - lineHeight) / 2;
+
+        shape.getText().replaceAllText(token, '');
+        slide.insertImage(blob, imageLeft, Math.max(top, imageTop), imageWidth, imageHeight);
+        placed = true;
+      } catch (ignored) {}
     });
   });
+  return placed;
+}
+
+function replaceSignaturePlaceholder_(presentation, signatureUrl) {
+  var signature = parseAndAssertFile_(signatureUrl, 'E-signature').file.getBlob();
+  return replaceImagePlaceholder_(presentation, '{{Signature}}', signature, { heightRatio: 0.22, widthRatio: 0.35 });
 }
 
 function replaceQrPlaceholder_(presentation, verificationUrl) {
-  var blob=null;
-  presentation.getSlides().forEach(function(slide){slide.getShapes().forEach(function(shape){
-    try{if(shape.getText().asString().indexOf('{{QRCode}}')<0)return;if(!blob)blob=UrlFetchApp.fetch('https://quickchart.io/qr?size=300&margin=2&text='+encodeURIComponent(verificationUrl)).getBlob().setName('verification-qr.png');var left=shape.getLeft(),top=shape.getTop(),width=shape.getWidth(),height=shape.getHeight();shape.remove();slide.insertImage(blob,left,top,width,height);}catch(_){try{shape.getText().replaceAllText('{{QRCode}}','');}catch(__){}}
-  });});
+  var blob;
+  try {
+    blob = UrlFetchApp.fetch('https://quickchart.io/qr?size=300&margin=2&text=' + encodeURIComponent(verificationUrl))
+      .getBlob().setName('verification-qr.png');
+  } catch (fetchError) {
+    // No QR service: strip the token so the certificate does not print it raw.
+    try { presentation.replaceAllText('{{QRCode}}', ''); } catch (ignored) {}
+    return false;
+  }
+  return replaceImagePlaceholder_(presentation, '{{QRCode}}', blob, { heightRatio: 0.3, widthRatio: 0.18, align: 'left' });
 }
 
 // --------------------- Drive REST helpers ----------------------------
@@ -1714,6 +1801,7 @@ function adminGetFeedbackAnalytics(activityId, adminToken) {
   var questionCols = [];
   for (var q=1;q<=15;q++) questionCols.push(idxOf_(hdr,['answer'+q,'q'+q,'question'+q]));
   var questionTotals = new Array(15).fill(0), questionCounts = new Array(15).fill(0), distribution = [0,0,0,0,0];
+  var yesCounts = new Array(15).fill(0), yesNoCounts = new Array(15).fill(0);
   var answeredRows = 0, queue = {queued:0,processing:0,issued:0,failed:0};
   // Long-text answers are not scores: they count toward completion but never
   // toward averages or the 1-5 distribution.
@@ -1722,9 +1810,12 @@ function adminGetFeedbackAnalytics(activityId, adminToken) {
     var answered = 0;
     questionCols.forEach(function(col,index){
       if(col<0)return;
-      if(safeTrim_(row[col])!=='')answered++;
+      var raw=safeTrim_(row[col]);
+      if(raw!=='')answered++;
+      var qType=normalizeQuestionType_(questionMeta['type'+(index+1)]);
+      if(qType==='yesno'&&raw!==''){yesNoCounts[index]++;if(/^y(es)?$/i.test(raw))yesCounts[index]++;}
       var score=Number(row[col]);
-      if(score>=1&&score<=5&&normalizeQuestionType_(questionMeta['type'+(index+1)])==='rating'){questionTotals[index]+=score;questionCounts[index]++;distribution[Math.round(score)-1]++;}
+      if(score>=1&&score<=5&&qType==='rating'){questionTotals[index]+=score;questionCounts[index]++;distribution[Math.round(score)-1]++;}
     });
     if(answered===15)answeredRows++;
     var status=statusCol>=0?safeTrim_(row[statusCol]).toUpperCase():'';
@@ -1732,7 +1823,7 @@ function adminGetFeedbackAnalytics(activityId, adminToken) {
   });
   var totalScore=questionTotals.reduce(function(a,b){return a+b;},0), totalAnswers=questionCounts.reduce(function(a,b){return a+b;},0);
   var average=totalAnswers?Number((totalScore/totalAnswers).toFixed(2)):0;
-  return {scope:activityId||'all',totalResponses:values.length,averageScore:average,overallAverage:overall.averageScore,overallResponses:allValues.length,scoreDelta:Number((average-overall.averageScore).toFixed(2)),completionRate:values.length?Number((answeredRows/values.length*100).toFixed(1)):0,certificateIssueRate:values.length?Number((queue.issued/values.length*100).toFixed(1)):0,positiveRate:totalAnswers?Number(((distribution[3]+distribution[4])/totalAnswers*100).toFixed(1)):0,certificates:queue,distribution:distribution,questions:questionTotals.map(function(total,index){var type=normalizeQuestionType_(questionMeta['type'+(index+1)]);return{label:'Question '+(index+1),type:type,responses:questionCounts[index],average:questionCounts[index]?Number((total/questionCounts[index]).toFixed(2)):0};})};
+  return {scope:activityId||'all',totalResponses:values.length,averageScore:average,overallAverage:overall.averageScore,overallResponses:allValues.length,scoreDelta:Number((average-overall.averageScore).toFixed(2)),completionRate:values.length?Number((answeredRows/values.length*100).toFixed(1)):0,certificateIssueRate:values.length?Number((queue.issued/values.length*100).toFixed(1)):0,positiveRate:totalAnswers?Number(((distribution[3]+distribution[4])/totalAnswers*100).toFixed(1)):0,certificates:queue,distribution:distribution,questions:questionTotals.map(function(total,index){var type=normalizeQuestionType_(questionMeta['type'+(index+1)]);return{label:'Question '+(index+1),type:type,responses:type==='yesno'?yesNoCounts[index]:questionCounts[index],average:questionCounts[index]?Number((total/questionCounts[index]).toFixed(2)):0,yesRate:yesNoCounts[index]?Number((yesCounts[index]/yesNoCounts[index]*100).toFixed(1)):0};})};
 }
 
 function computeScoreSummary_(values,hdr){var total=0,count=0,meta=questionTypesSafe_();for(var q=1;q<=15;q++){var col=idxOf_(hdr,['answer'+q,'q'+q,'question'+q]);if(col<0)continue;if(normalizeQuestionType_(meta['type'+q])!=='rating')continue;values.forEach(function(row){var score=Number(row[col]);if(score>=1&&score<=5){total+=score;count++;}});}return{averageScore:count?Number((total/count).toFixed(2)):0};}
@@ -1856,8 +1947,8 @@ function adminSaveQuestions(questions, adminToken) {
   return questions;
 }
 
-/** The two supported answer formats. 'rating' is the existing 1-5 scale. */
-var QUESTION_TYPES = ['rating','text'];
+/** Supported answer formats. 'rating' is the 1-5 scale. */
+var QUESTION_TYPES = ['rating','text','yesno'];
 
 /**
  * Question types for analytics. Never throws: a missing or unreadable
@@ -1877,6 +1968,7 @@ function questionTypesSafe_() {
 function normalizeQuestionType_(value) {
   var raw = safeTrim_(value).toLowerCase();
   if (raw === 'text' || raw === 'long text' || raw === 'longtext' || raw === 'essay') return 'text';
+  if (raw === 'yesno' || raw === 'yes/no' || raw === 'yes-no' || raw === 'yn' || raw === 'boolean') return 'yesno';
   return 'rating';
 }
 
@@ -2128,6 +2220,59 @@ function __authCheck2() {
           .createFile(Utilities.newBlob('x','text/plain','__ac.txt')).getId(); }
   catch (e) { out.folderWrite = 'FAIL: ' + e.message; }
   out.user = Session.getEffectiveUser().getEmail();
+  Logger.log(JSON.stringify(out, null, 2));
+  return out;
+}
+/**
+ * Read-only. Explains WHY the audit chain reports a mismatch, instead of
+ * leaving "a row may have been edited" as the only hypothesis.
+ *
+ * Reports the first failing row and separates the three real causes:
+ *   - every row fails            → AUDIT_HASH_SECRET changed or was overwritten
+ *   - only some rows fail        → those rows were edited/deleted, OR their
+ *                                  timestamp was reformatted by Sheets
+ *   - rows verify but head fails → the last entries were deleted
+ */
+function auditChainDiagnose() {
+  var props = PropertiesService.getScriptProperties();
+  var secret = props.getProperty('AUDIT_HASH_SECRET') || '';
+  var expectedHead = props.getProperty('AUDIT_HEAD_HASH') || '';
+  var sh = SpreadsheetApp.getActiveSpreadsheet().getSheetByName('Audit');
+  var out = { rows: 0, hashFailures: 0, linkFailures: 0, firstBadRow: 0, secretPresent: !!secret, headMatches: true, timestampReformatted: false, samples: [] };
+  if (!sh || sh.getLastRow() < 2) { out.verdict = 'Audit log is empty.'; Logger.log(JSON.stringify(out, null, 2)); return out; }
+
+  var hdr = getHeaderMap_(sh);
+  var rows = sh.getRange(2, 1, sh.getLastRow() - 1, sh.getLastColumn()).getDisplayValues();
+  out.rows = rows.length;
+  var previous = null;
+
+  for (var i = 0; i < rows.length; i++) {
+    var row = rows[i];
+    function cell(name){ return name in hdr ? safeTrim_(row[hdr[name]]) : ''; }
+    var entry = {timestamp:cell('timestamp'),audit_id:cell('audit_id'),actor_email:cell('actor_email'),actor_role:cell('actor_role'),action:cell('action'),target_type:cell('target_type'),target_id:cell('target_id'),outcome:cell('outcome'),details:cell('details'),request_id:cell('request_id'),previous_hash:cell('previous_hash'),entry_hash:cell('entry_hash')};
+
+    // A timestamp Sheets has reformatted no longer looks like what was hashed.
+    if (entry.timestamp && !/^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}$/.test(entry.timestamp)) {
+      out.timestampReformatted = true;
+      if (out.samples.length < 3) out.samples.push({ row: i + 2, timestamp: entry.timestamp });
+    }
+
+    var hashOk = secret && constantTimeEquals_(hmac256Base64_(auditCanonical_(entry), secret), entry.entry_hash);
+    if (!hashOk) { out.hashFailures++; if (!out.firstBadRow) out.firstBadRow = i + 2; }
+    if (previous !== null && entry.previous_hash !== previous) { out.linkFailures++; if (!out.firstBadRow) out.firstBadRow = i + 2; }
+    previous = entry.entry_hash;
+  }
+  out.headMatches = !expectedHead || previous === expectedHead;
+
+  out.verdict = !secret
+    ? 'AUDIT_HASH_SECRET is missing. Nothing can be verified. It is set by setupParticipantFeedbackSheets().'
+    : out.timestampReformatted
+      ? 'Timestamps were reformatted by Google Sheets, so their hashes cannot match. This is a formatting artifact, NOT tampering. ensureAuditSheet_() now pins the column to plain text; clear the log once (resetTestingData with auditLog:true) and future rows will verify.'
+      : out.hashFailures === out.rows
+        ? 'Every row fails: AUDIT_HASH_SECRET changed after these rows were written.'
+        : out.hashFailures || out.linkFailures
+          ? 'Some rows fail starting at sheet row ' + out.firstBadRow + '. Those rows were edited or deleted directly in Sheets.'
+          : out.headMatches ? 'Chain is intact.' : 'Rows verify but the head does not: the most recent entries were deleted.';
   Logger.log(JSON.stringify(out, null, 2));
   return out;
 }

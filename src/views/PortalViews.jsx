@@ -404,6 +404,27 @@ export function PublicForm() {
                         />
                       </label>
                     );
+                  if (q.type === "yesno")
+                    return (
+                      <fieldset key={idx} className="rating yesno">
+                        <legend>{`${idx + 1}. ${q.text}`}</legend>
+                        <div className="rating-options yesno-options">
+                          {["Yes", "No"].map((choice) => (
+                            <button
+                              type="button"
+                              key={choice}
+                              className={ratings[idx] === choice ? "selected" : ""}
+                              aria-pressed={ratings[idx] === choice}
+                              onClick={() =>
+                                setRatings((r) => ({ ...r, [idx]: choice }))
+                              }
+                            >
+                              <span>{choice}</span>
+                            </button>
+                          ))}
+                        </div>
+                      </fieldset>
+                    );
                   return (
                     <Rating
                       key={idx}

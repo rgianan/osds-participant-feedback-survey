@@ -720,25 +720,32 @@ function QuestionsPanel() {
               ),
             );
           return (
-            <label key={index}>
-              <span>{index + 1}</span>
-              <textarea
-                required
-                value={question.text}
-                onChange={(e) => patch({ text: e.target.value })}
-                aria-label={`Question ${index + 1}`}
-              />
-              <select
-                className="question-type"
-                value={question.type}
-                onChange={(e) => patch({ type: e.target.value })}
-                aria-label={`Answer type for question ${index + 1}`}
-                title="Multiple option asks for a 1-5 rating. Long text asks for a written answer."
-              >
-                <option value="rating">Multiple option (1-5)</option>
-                <option value="text">Long text</option>
-              </select>
-            </label>
+            <div className="question-row" key={index}>
+              <span className="question-number">{index + 1}</span>
+              <div className="question-fields">
+                <label>
+                  Question {index + 1}
+                  <textarea
+                    required
+                    value={question.text}
+                    onChange={(e) => patch({ text: e.target.value })}
+                  />
+                </label>
+                <label>
+                  Answer type
+                  <select
+                    className="question-type"
+                    value={question.type}
+                    onChange={(e) => patch({ type: e.target.value })}
+                    title="How participants answer this question."
+                  >
+                    <option value="rating">Multiple option (1–5)</option>
+                    <option value="yesno">Yes or No</option>
+                    <option value="text">Long text</option>
+                  </select>
+                </label>
+              </div>
+            </div>
           );
         })}
       </div>
@@ -1076,6 +1083,17 @@ function AnalyticsPanel({ data, activities, activityFilter, onFilter }) {
                       title="Long text question — written answers are in the Responses sheet."
                     >
                       Text
+                    </strong>
+                  </>
+                ) : question.type === "yesno" ? (
+                  <>
+                    <i>
+                      <b style={{ width: `${question.yesRate || 0}%` }} />
+                    </i>
+                    <strong
+                      title={`${question.responses || 0} yes/no answers`}
+                    >
+                      {Number(question.yesRate || 0).toFixed(0)}% yes
                     </strong>
                   </>
                 ) : (
