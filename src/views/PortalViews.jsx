@@ -35,32 +35,55 @@ const emptyForm = {
 };
 
 
+// One source for the scale. The labels used to be repeated three times per
+// button (aria-label, title, visible text), which is how they drift apart.
+const RATING_SCALE = [
+  { value: 1, emoji: "😠", label: "Strongly disagree" },
+  { value: 2, emoji: "🙁", label: "Disagree" },
+  { value: 3, emoji: "😐", label: "Neutral" },
+  { value: 4, emoji: "🙂", label: "Agree" },
+  { value: 5, emoji: "😄", label: "Strongly agree" },
+];
+
+/**
+ * Below 600px the per-button labels are hidden by CSS, leaving only the emoji.
+ * This legend keeps the scale readable there. aria-hidden because each button
+ * already announces its own full label.
+ */
+function RatingLegend() {
+  return (
+    <ul className="rating-legend" aria-hidden="true">
+      {RATING_SCALE.map((option) => (
+        <li key={option.value}>
+          <i>{option.emoji}</i>
+          {option.label}
+        </li>
+      ))}
+    </ul>
+  );
+}
+
 function Rating({ value, onChange, label }) {
   return (
     <fieldset className="rating">
       <legend>{label}</legend>
       <div className="rating-options">
-        {[1, 2, 3, 4, 5].map((n) => (
+        {RATING_SCALE.map((option) => (
           <button
             type="button"
-            key={n}
-            onClick={() => onChange(n)}
-            className={value === n ? "selected" : ""}
-            aria-label={`${n} out of 5`}
-            title={`${n} out of 5 — ${["Strongly disagree", "Disagree", "Neutral", "Agree", "Strongly agree"][n - 1]}`}
+            key={option.value}
+            onClick={() => onChange(option.value)}
+            className={value === option.value ? "selected" : ""}
+            aria-label={`${option.value} out of 5 — ${option.label}`}
+            title={`${option.value} out of 5 — ${option.label}`}
           >
-            <span>{n}</span>
-            <small>
-              {
-                [
-                  "Strongly disagree",
-                  "Disagree",
-                  "Neutral",
-                  "Agree",
-                  "Strongly agree",
-                ][n - 1]
-              }
-            </small>
+            {/* Decorative only: the visible label and aria-label carry meaning,
+                so a screen reader never reads the emoji's own name. */}
+            <i className="rating-emoji" aria-hidden="true">
+              {option.emoji}
+            </i>
+            <span>{option.value}</span>
+            <small>{option.label}</small>
           </button>
         ))}
       </div>
@@ -388,6 +411,11 @@ export function PublicForm() {
                     </p>
                   </div>
                 </div>
+                {/* Match the type, don't exclude the others: a blacklist would
+                    show the 1-5 legend for any future type added elsewhere. */}
+                {questions
+                  .slice(...groups)
+                  .some((q) => q.type === "rating") && <RatingLegend />}
                 {questions.slice(...groups).map((q, j) => {
                   const idx = groups[0] + j;
                   if (q.type === "text")

@@ -8,3 +8,11 @@
 
 .rating-options.yesno-options{grid-template-columns:repeat(2,1fr)}
 .rating-options.yesno-options button{padding:14px 4px}
+
+.rating-emoji{display:block;font-style:normal;font-size:21px;line-height:1;margin-bottom:5px}
+.rating-options button:not(.selected) .rating-emoji{filter:grayscale(.55);opacity:.8}
+.rating-options button.selected .rating-emoji{filter:none;opacity:1;transform:scale(1.08)}
+.rating-legend{display:flex;flex-wrap:wrap;gap:7px 15px;list-style:none;margin:0 0 22px;padding:11px 13px;background:#f4f8f3;border:1px solid #e2ebe1;border-radius:12px;font-size:11px;color:var(--muted);font-weight:700}
+.rating-legend li{display:flex;align-items:center;gap:6px}
+.rating-legend i{font-style:normal;font-size:15px;line-height:1}
+@media(max-width:600px){.rating-emoji{font-size:23px;margin-bottom:0}}

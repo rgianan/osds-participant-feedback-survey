@@ -141,6 +141,44 @@ function fmtDate_(v){
   }
   return safeTrim_(v);
 }
+var MONTH_NAMES_ = ['January','February','March','April','May','June','July','August','September','October','November','December'];
+
+/** 'yyyy-MM-dd' → {y,m,d}, or null when the value is not a date key. */
+function parseDateKey_(key) {
+  var match = safeTrim_(key).match(/^(\d{4})-(\d{2})-(\d{2})$/);
+  if (!match) return null;
+  return { y: Number(match[1]), m: Number(match[2]), d: Number(match[3]) };
+}
+
+/** '2026-08-04' → 'August 4, 2026'. Unparseable values pass through unchanged. */
+function fmtLongDate_(key) {
+  var parts = parseDateKey_(key);
+  if (!parts || parts.m < 1 || parts.m > 12) return safeTrim_(key);
+  return MONTH_NAMES_[parts.m - 1] + ' ' + parts.d + ', ' + parts.y;
+}
+
+/**
+ * Reads as a sentence fragment, so a one-day activity does not print
+ * "on August 24, 2026 to August 24, 2026".
+ *
+ *   same day          → "on August 24, 2026"
+ *   same month        → "from August 24 to 26, 2026"
+ *   same year         → "from August 30 to September 2, 2026"
+ *   spanning years    → "from December 30, 2026 to January 2, 2027"
+ */
+function activityDateRangeText_(fromKey, toKey) {
+  var from = parseDateKey_(fromKey), to = parseDateKey_(toKey);
+  if (!from && !to) return '';
+  if (!from) { from = to; fromKey = toKey; to = null; }
+  if (!to || (from.y === to.y && from.m === to.m && from.d === to.d))
+    return 'on ' + fmtLongDate_(fromKey);
+  if (from.y === to.y && from.m === to.m)
+    return 'from ' + MONTH_NAMES_[from.m - 1] + ' ' + from.d + ' to ' + to.d + ', ' + from.y;
+  if (from.y === to.y)
+    return 'from ' + MONTH_NAMES_[from.m - 1] + ' ' + from.d + ' to ' + MONTH_NAMES_[to.m - 1] + ' ' + to.d + ', ' + from.y;
+  return 'from ' + fmtLongDate_(fromKey) + ' to ' + fmtLongDate_(toKey);
+}
+
 function extractDriveFileId_(input) {
   var s = safeTrim_(input);
   if (!s) return '';
@@ -1214,10 +1252,14 @@ function sendCertificateForResponse_(responsesRowIndex) {
   pres.replaceAllText('{{Name}}', name);
   pres.replaceAllText('{{Title}}', aTitle);
   pres.replaceAllText('{{Venue}}', aVenue);
-  pres.replaceAllText('{{Date}}', aDate);
-  pres.replaceAllText('{{FromDate}}', aFrom);
-  pres.replaceAllText('{{ToDate}}', aTo);
-  pres.replaceAllText('{{GivenDate}}', aGiven);
+  // Dates print as "August 4, 2026" — no leading zeros. {{DateRange}} is the
+  // preferred placeholder: it collapses a one-day activity to a single date
+  // instead of "on <date> to <same date>".
+  pres.replaceAllText('{{DateRange}}', activityDateRangeText_(aFrom, aTo));
+  pres.replaceAllText('{{Date}}', fmtLongDate_(aDate));
+  pres.replaceAllText('{{FromDate}}', fmtLongDate_(aFrom));
+  pres.replaceAllText('{{ToDate}}', fmtLongDate_(aTo));
+  pres.replaceAllText('{{GivenDate}}', fmtLongDate_(aGiven));
   pres.replaceAllText('{{Signatory}}', aSignatory);
   pres.replaceAllText('{{Designation}}', aDesignation);
   if (aSignature) replaceSignaturePlaceholder_(pres, aSignature);
@@ -1251,29 +1293,23 @@ function sendCertificateForResponse_(responsesRowIndex) {
   // --- Email link (no attachment) ---
   var emailStatus = '';
   if (email) {
-    var tz = Session.getScriptTimeZone() || 'UTC';
-    var sentAt = Utilities.formatDate(new Date(), tz, 'yyyy-MM-dd HH:mm');
-    var subject = 'Certificate: ' + aTitle;
-
-    var bodyText =
-      'Dear ' + name + ',\n\n' +
-      'Your certificate for "' + aTitle + '" is ready:\n' + certUrl + '\n\n' +
-      'Verification code: ' + verification.code + '\nVerify: ' + verification.url + '\n\nThank you.';
-    var bodyHtml =
-      '<p>Dear ' + escapeHtml_(name) + ',</p>' +
-      '<p>Your certificate for "<b>' + escapeHtml_(aTitle) + '</b>" is ready:</p>' +
-      '<p><a href="' + escapeHtml_(certUrl) + '">Open certificate (PDF)</a></p>' +
-      '<p>Verification code: <b>' + escapeHtml_(verification.code) + '</b><br><a href="' + escapeHtml_(verification.url) + '">Verify certificate</a></p>' +
-      '<p>Thank you.</p>';
-
+    var sentAt = Utilities.formatDate(new Date(), Session.getScriptTimeZone() || 'UTC', 'yyyy-MM-dd HH:mm');
+    var mail = buildCertificateEmail_({
+      name: name,
+      title: aTitle,
+      venue: aVenue,
+      dateRange: activityDateRangeText_(aFrom, aTo),
+      certificateUrl: certUrl,
+      verificationCode: verification.code,
+      verificationUrl: verification.url
+    });
     MailApp.sendEmail({
       to: email,
-      subject: subject,
-      body: bodyText,
-      htmlBody: bodyHtml,
-      name: 'Certificates'
+      subject: mail.subject,
+      body: mail.text,
+      htmlBody: mail.html,
+      name: 'CHED Office of Student Development and Services'
     });
-
     emailStatus = sentAt + sharingWarning;
   } else {
     emailStatus = 'No recipient email' + sharingWarning;
@@ -2275,4 +2311,84 @@ function auditChainDiagnose() {
           : out.headMatches ? 'Chain is intact.' : 'Rows verify but the head does not: the most recent entries were deleted.';
   Logger.log(JSON.stringify(out, null, 2));
   return out;
+}
+
+/**
+ * Certificate email. Built with tables and inline styles because Gmail,
+ * Outlook and most mobile clients strip <style> blocks and ignore flexbox.
+ * Every interpolated value is escaped: the participant's name and the activity
+ * title are user-supplied.
+ */
+function buildCertificateEmail_(data) {
+  data = data || {};
+  var name = safeTrim_(data.name);
+  var title = safeTrim_(data.title);
+  var venue = safeTrim_(data.venue);
+  var dateRange = safeTrim_(data.dateRange);
+  var certificateUrl = safeTrim_(data.certificateUrl);
+  var code = safeTrim_(data.verificationCode);
+  var verifyUrl = safeTrim_(data.verificationUrl);
+  // submitFeedback rejects a blank name, but this is outbound mail: a fallback
+  // costs nothing and "Dear ," reaching a participant would not be recoverable.
+  var firstName = name.split(' ')[0] || name || 'Participant';
+
+  var whenWhere = dateRange ? (' held ' + dateRange) : '';
+  if (venue) whenWhere += (whenWhere ? ' at ' : ' held at ') + venue;
+
+  var subject = 'Your certificate for ' + title;
+
+  var text =
+    'Dear ' + firstName + ',\n\n' +
+    'Thank you for taking part in ' + title + whenWhere + ', and for sharing your feedback.\n\n' +
+    'Your Certificate of Participation is ready:\n' + certificateUrl + '\n\n' +
+    'Verification code: ' + code + '\n' +
+    'Anyone can confirm this certificate is genuine at:\n' + verifyUrl + '\n\n' +
+    'Please keep this email for your records.\n\n' +
+    'Office of Student Development and Services\n' +
+    'Commission on Higher Education';
+
+  var html =
+    '<div style="margin:0;padding:24px 12px;background:#f5f7f2;font-family:Arial,Helvetica,sans-serif;">' +
+      '<table role="presentation" cellpadding="0" cellspacing="0" border="0" width="100%" style="max-width:600px;margin:0 auto;background:#ffffff;border:1px solid #dfe7e1;border-radius:14px;overflow:hidden;">' +
+        '<tr><td style="background:#0b4b3c;padding:20px 28px;">' +
+          '<table role="presentation" cellpadding="0" cellspacing="0" border="0"><tr>' +
+            '<td style="padding-right:12px;"><img src="https://ik.imagekit.io/k2qmtccm6/CHED-cropped-logo100x100.png" width="40" height="40" alt="CHED" style="display:block;border:0;"></td>' +
+            '<td style="color:#ffffff;font-size:14px;font-weight:bold;line-height:1.3;">Commission on Higher Education' +
+              '<div style="color:#b9d1c9;font-size:11px;font-weight:normal;">Office of Student Development and Services</div>' +
+            '</td>' +
+          '</tr></table>' +
+        '</td></tr>' +
+        '<tr><td style="padding:30px 28px 8px;">' +
+          '<div style="text-transform:uppercase;letter-spacing:.12em;font-size:11px;font-weight:bold;color:#36836c;">Certificate of Participation</div>' +
+          '<h1 style="margin:10px 0 0;font-size:22px;line-height:1.25;color:#143f34;">Your certificate is ready</h1>' +
+        '</td></tr>' +
+        '<tr><td style="padding:14px 28px 0;color:#3c4f49;font-size:14px;line-height:1.65;">' +
+          '<p style="margin:0 0 14px;">Dear ' + escapeHtml_(firstName) + ',</p>' +
+          '<p style="margin:0 0 14px;">Thank you for taking part in <strong style="color:#143f34;">' + escapeHtml_(title) + '</strong>' + escapeHtml_(whenWhere) + ', and for sharing your feedback.</p>' +
+        '</td></tr>' +
+        '<tr><td style="padding:12px 28px 4px;">' +
+          '<table role="presentation" cellpadding="0" cellspacing="0" border="0"><tr><td style="background:#0b4b3c;border-radius:10px;">' +
+            '<a href="' + escapeHtml_(certificateUrl) + '" style="display:inline-block;padding:13px 26px;color:#ffffff;font-size:14px;font-weight:bold;text-decoration:none;">Open your certificate (PDF)</a>' +
+          '</td></tr></table>' +
+        '</td></tr>' +
+        '<tr><td style="padding:20px 28px 4px;">' +
+          '<table role="presentation" cellpadding="0" cellspacing="0" border="0" width="100%" style="background:#f1f7f0;border:1px solid #dce9da;border-radius:10px;">' +
+            '<tr><td style="padding:14px 16px;font-size:13px;color:#3c4f49;line-height:1.6;">' +
+              '<div style="font-size:11px;text-transform:uppercase;letter-spacing:.08em;color:#6d7f79;font-weight:bold;">Verification code</div>' +
+              '<div style="font-family:Consolas,Menlo,monospace;font-size:15px;color:#143f34;font-weight:bold;padding:4px 0;">' + escapeHtml_(code) + '</div>' +
+              '<a href="' + escapeHtml_(verifyUrl) + '" style="color:#0b4b3c;font-size:12px;">Confirm this certificate is genuine</a>' +
+            '</td></tr>' +
+          '</table>' +
+        '</td></tr>' +
+        '<tr><td style="padding:18px 28px 26px;color:#6d7f79;font-size:12px;line-height:1.6;">' +
+          '<p style="margin:0 0 6px;">Please keep this email for your records. If the button does not work, copy this link:<br>' +
+            '<span style="color:#3c4f49;word-break:break-all;">' + escapeHtml_(certificateUrl) + '</span></p>' +
+        '</td></tr>' +
+        '<tr><td style="background:#f8faf7;border-top:1px solid #edf0ed;padding:16px 28px;color:#6d7f79;font-size:11px;line-height:1.5;">' +
+          'Office of Student Development and Services<br>Commission on Higher Education' +
+        '</td></tr>' +
+      '</table>' +
+    '</div>';
+
+  return { subject: subject, text: text, html: html };
 }
