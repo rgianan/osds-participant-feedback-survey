@@ -6,9 +6,9 @@
 var ENFORCE_WHITELIST = true; // gate /?admin behind Whitelist
 
 // Folder for certificate templates (Google Slides preferred; PPT/PPTX will be converted)
-var TEMPLATE_FOLDER_ID = '1p621gez5fInaAywXdy7vqoyqQfQctlkY';
+var TEMPLATE_FOLDER_ID = '1wATGGRc5X0f8LgRBQULer7Bb-r7jwvO_';
 // Folder where generated certificate PDFs will be stored
-var CERTIFICATES_FOLDER_ID = '1wvfjg33QkmO_WkRsDJuW5QTMBWCJ-8T8';
+var CERTIFICATES_FOLDER_ID = '1LPvBeWVlo8AhJbDJxh75gq3Kz5KQpMMw';
 
 // Queue tuning. Ten certificates per run keeps normal executions comfortably
 // below Apps Script's six-minute limit. Pending rows remain in the sheet and
@@ -204,13 +204,90 @@ function setupParticipantFeedbackSecurity() {
 }
 
 /**
- * Run this instead of setupParticipantFeedbackSecurity() when you need to see
- * the token. Apps Script does not display return values, so the result is
- * written to the execution log. Rotates both secrets, exactly like the
- * function it wraps. Clear the log afterwards.
+ * DESTRUCTIVE. Generates a NEW submit token and logs it, because Apps Script
+ * does not display return values. Every existing copy of the token stops
+ * working immediately, so after running this you must update BOTH .env and
+ * Netlify's SUBMIT_SHARED_TOKEN, and every administrator is signed out.
+ *
+ * To check a token you already have without rotating, use
+ * verifySubmitSharedToken('<token>') instead.
+ *
+ * The previous name (logSubmitSharedToken) read like a query and invited
+ * exactly this mistake.
  */
-function logSubmitSharedToken() {
+function rotateSubmitSharedTokenAndLog() {
   Logger.log(JSON.stringify(setupParticipantFeedbackSecurity(), null, 2));
+}
+
+/**
+ * Read-only Drive check. Run from the editor to (a) trigger the Drive consent
+ * prompt if the project has never been authorized for it, and (b) confirm the
+ * two hardcoded folder IDs are reachable.
+ *
+ * "Access denied: DriveApp" means the script is not authorized for Drive —
+ * usually the editor's appsscript.json is missing the drive scope, or the grant
+ * predates it. A wrong or inaccessible folder ID reports a different message
+ * naming the folder instead.
+ */
+function checkDriveAccess() {
+  var result = { templateFolder: '', certificatesFolder: '', ok: false };
+  try {
+    result.templateFolder = DriveApp.getFolderById(TEMPLATE_FOLDER_ID).getName();
+    result.certificatesFolder = DriveApp.getFolderById(CERTIFICATES_FOLDER_ID).getName();
+    result.ok = true;
+    result.verdict = 'Drive is authorized and both folders are reachable.';
+  } catch (error) {
+    result.error = String(error && error.message || error);
+    result.verdict = /access denied|authorization|permission/i.test(result.error)
+      ? 'Not authorized for Drive. Enable the manifest in Project Settings, make sure appsscript.json lists https://www.googleapis.com/auth/drive, accept the consent prompt, then create a NEW deployment.'
+      : 'Drive is authorized but a folder ID is wrong or not shared with this account. Check TEMPLATE_FOLDER_ID and CERTIFICATES_FOLDER_ID at the top of this file.';
+  }
+  Logger.log(JSON.stringify(result, null, 2));
+  return result;
+}
+
+/**
+ * Paste a token here and run verifyPastedToken() from the editor. The Run
+ * button cannot pass arguments to a function, which is why this constant
+ * exists — running verifySubmitSharedToken() directly checks an empty string.
+ */
+var TOKEN_TO_VERIFY = '';
+
+function verifyPastedToken() {
+  return verifySubmitSharedToken(TOKEN_TO_VERIFY);
+}
+
+/**
+ * Read-only. Answers "is this token still valid?" without changing anything.
+ * Paste the value from .env or Netlify.
+ */
+function verifySubmitSharedToken(token) {
+  var expected = PropertiesService.getScriptProperties().getProperty('SUBMIT_SHARED_TOKEN_HASH');
+  var result = {
+    configured: !!expected,
+    // A one-way digest, safe to read out. Comparing it against the hash of a
+    // token you hold proves whether the editor and the deployed /exec URL are
+    // the same Apps Script project.
+    storedHash: expected || '',
+    hashOfGivenToken: safeTrim_(token) ? sha256Base64_(safeTrim_(token)) : '',
+    tokenLength: safeTrim_(token).length,
+    matches: !!expected && !!safeTrim_(token) && constantTimeEquals_(sha256Base64_(safeTrim_(token)), expected),
+    rotatedAt: PropertiesService.getScriptProperties().getProperty('SECURITY_SECRETS_UPDATED_AT') || 'unknown'
+  };
+  // A real hash is 43 chars of web-safe base64. Anything else means the
+  // property was overwritten by hand with a raw token, in which case NO token
+  // can ever validate and rotating is the only fix.
+  var looksLikeHash = /^[A-Za-z0-9_-]{43}$/.test(safeTrim_(expected));
+  result.storedValueLooksLikeHash = looksLikeHash;
+  result.verdict = !result.configured
+    ? 'Backend security is not configured. Run setupParticipantFeedbackSecurity() once.'
+    : !looksLikeHash
+      ? 'BROKEN: SUBMIT_SHARED_TOKEN_HASH does not hold a hash (expected 43 base64 chars). It was probably overwritten by hand with a plaintext token, so every request fails. Fix: run rotateSubmitSharedTokenAndLog() once, put the logged token in .env and Netlify ONLY, and never paste anything into Script Properties.'
+      : result.matches
+        ? 'This token is valid. Nothing was changed.'
+        : 'This token does NOT match. Copy the token from the most recent rotation in Executions, or rotate again with rotateSubmitSharedTokenAndLog().';
+  Logger.log(JSON.stringify(result, null, 2));
+  return result;
 }
 
 function assertSubmitSharedToken_(token) {
@@ -2039,4 +2116,18 @@ function resetTestingData(confirmation, options) {
   } finally {
     try { lock.releaseLock(); } catch (ignored) {}
   }
+}
+
+function __authCheck2() {
+  var out = {};
+  try { out.rootWrite = DriveApp.createFile(Utilities.newBlob('x','text/plain','__ac.txt')).getId(); }
+  catch (e) { out.rootWrite = 'FAIL: ' + e.message; }
+  try { out.folderName = DriveApp.getFolderById(TEMPLATE_FOLDER_ID).getName(); }
+  catch (e) { out.folderName = 'FAIL: ' + e.message; }
+  try { out.folderWrite = DriveApp.getFolderById(TEMPLATE_FOLDER_ID)
+          .createFile(Utilities.newBlob('x','text/plain','__ac.txt')).getId(); }
+  catch (e) { out.folderWrite = 'FAIL: ' + e.message; }
+  out.user = Session.getEffectiveUser().getEmail();
+  Logger.log(JSON.stringify(out, null, 2));
+  return out;
 }
