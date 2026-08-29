@@ -9,7 +9,7 @@
   align-items: center;
   font-size: 13px;
   font-weight: 700;
-  color: #b9d1c9;
+  color: #b9c1d1;
   margin-bottom: 5px;
   text-align: left;
 }
@@ -44,7 +44,7 @@
 .management-heading h2 {
   font: 800 18px Manrope;
   margin: 0;
-  color: #173f35;
+  color: #001f5c;
 }
 .management-heading p {
   font-size: 12px;
@@ -84,8 +84,8 @@
   font-weight: 800;
 }
 .status-pill.enabled {
-  background: #e4f2e9;
-  color: #317158;
+  background: #e4e8f2;
+  color: #314571;
 }
 .status-pill.disabled {
   background: #f5e8e5;
@@ -94,16 +94,16 @@
 .mini-button {
   border: 1px solid var(--border);
   background: #fff;
-  color: #36574e;
+  color: #364057;
   border-radius: 8px;
   padding: 7px 10px;
   font-weight: 700;
   font-size: 11px;
 }
 .notice {
-  background: #edf7ef;
-  color: #28654d;
-  border: 1px solid #cfe7d5;
+  background: #edf0f7;
+  color: #283b65;
+  border: 1px solid #cfd7e7;
   border-radius: 10px;
   padding: 11px 13px;
   font-size: 12px;
@@ -155,14 +155,14 @@
   font-weight: 600;
   text-transform: none;
   letter-spacing: normal;
-  color: #18322d;
+  color: #16213d;
 }
 .question-editor .question-row > span {
   width: 30px;
   height: 30px;
   border-radius: 9px;
-  background: #e7f1e9;
-  color: #32634f;
+  background: #e7eaf1;
+  color: #324263;
   display: grid;
   place-items: center;
   font-weight: 800;
@@ -192,3 +192,153 @@
 
 .question-editor .question-type{margin-top:6px;font-size:13px;padding:10px 12px;width:100%}
 .question-text textarea{min-height:110px}
+
+/* ---- Responses & certificate queue panels ---- */
+.panel-tools {
+  display: flex;
+  gap: 9px;
+  align-items: center;
+  flex-wrap: wrap;
+}
+.panel-tools .select-wrap select {
+  margin: 0;
+  width: 210px;
+  padding: 10px 12px;
+  font-size: 12px;
+}
+.panel-tools .select-wrap svg {
+  top: 12px;
+}
+.panel-tools .search {
+  margin: 0;
+}
+.panel-tools .search svg {
+  top: 11px;
+}
+.panel-tools .search input {
+  margin: 0;
+  width: 215px;
+  padding: 10px 12px 10px 36px;
+  font-size: 12px;
+}
+.empty-cell {
+  text-align: center;
+  color: var(--muted);
+  padding: 34px 16px;
+}
+.badge.state-issued {
+  background: #e2ecff;
+  color: #0032a0;
+}
+.badge.state-queued {
+  background: #fff2d6;
+  color: #8a6111;
+}
+.badge.state-processing {
+  background: #e7eaf1;
+  color: #3d4a66;
+}
+.badge.state-failed {
+  background: #fdecea;
+  color: #a5493a;
+}
+.detail-row td {
+  background: var(--tint);
+}
+.answer-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(84px, 1fr));
+  gap: 8px;
+}
+.answer-grid > div {
+  background: #fff;
+  border: 1px solid var(--border);
+  border-radius: 9px;
+  padding: 7px 9px;
+}
+.answer-grid span {
+  display: block;
+  font-size: 9px;
+  font-weight: 800;
+  color: var(--muted);
+  text-transform: uppercase;
+}
+.answer-grid strong {
+  display: block;
+  font-size: 12px;
+  margin-top: 3px;
+  overflow-wrap: anywhere;
+}
+.answer-notes {
+  margin-top: 12px;
+  font-size: 12px;
+  color: #3b4a63;
+}
+.answer-notes p {
+  margin: 0 0 6px;
+}
+.queue-tabs {
+  display: flex;
+  gap: 8px;
+  flex-wrap: wrap;
+  margin-bottom: 16px;
+}
+.queue-tabs button {
+  border: 1px solid var(--border);
+  background: #fff;
+  border-radius: 99px;
+  padding: 8px 14px;
+  font-size: 12px;
+  font-weight: 700;
+  color: #3d4a66;
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+}
+.queue-tabs button.active {
+  background: var(--green);
+  border-color: var(--green);
+  color: #fff;
+}
+.queue-tabs button i {
+  font-style: normal;
+  font-size: 10px;
+  font-weight: 800;
+  background: rgba(0, 50, 160, 0.1);
+  border-radius: 99px;
+  padding: 2px 7px;
+}
+.queue-tabs button.active i {
+  background: rgba(255, 255, 255, 0.22);
+}
+.queue-bulk {
+  display: flex;
+  gap: 9px;
+  align-items: center;
+  margin-bottom: 14px;
+  flex-wrap: wrap;
+}
+.queue-error {
+  color: #a5493a;
+  font-size: 11px;
+  display: block;
+  max-width: 380px;
+  overflow-wrap: anywhere;
+}
+.tick-col {
+  width: 34px;
+}
+.tick-col input {
+  margin: 0;
+  width: auto;
+  padding: 0;
+}
+@media (max-width: 900px) {
+  .panel-tools .select-wrap select,
+  .panel-tools .search input {
+    width: 100%;
+  }
+}
+
+.analytics-skeleton{display:grid;gap:22px}
+.analytics-skeleton .stats article{display:block}

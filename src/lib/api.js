@@ -1,3 +1,5 @@
+import { cached, invalidate, keyFor, patch, CACHE_TTL } from "./cache";
+
 const GAS_URL = import.meta.env.VITE_GAS_WEB_APP_URL || "";
 const USE_NETLIFY_PROXY =
   import.meta.env.PROD || import.meta.env.VITE_USE_NETLIFY_PROXY === "true";
@@ -7,8 +9,11 @@ const REMOTE_URL = USE_NETLIFY_PROXY
 const HAS_REMOTE = Boolean(REMOTE_URL);
 const DEMO_MODE =
   import.meta.env.DEV && import.meta.env.VITE_ENABLE_DEMO_MODE === "true";
+export { invalidate as invalidateCache, patch as patchCache, keyFor as cacheKey };
+
 // Answer formats, mirroring QUESTION_TYPES in Code.gs. Keep the two in step.
 export const QUESTION_TYPES = ["rating", "text", "yesno"];
+
 const SESSION_KEY = "participant_feedback_admin_session";
 const adminToken = () => {
   try {
@@ -167,10 +172,17 @@ export async function submitFeedback(payload, turnstileToken = "") {
   }
   requireBackend();
 }
-export async function getAdminActivities() {
-  if (window.google?.script) return gasRun("adminGetActivities", adminToken());
-  if (HAS_REMOTE)
-    return remote("adminGetActivities", { adminToken: adminToken() });
+export async function getAdminActivities({ force = false } = {}) {
+  const load = () => {
+    if (window.google?.script)
+      return gasRun("adminGetActivities", adminToken());
+    if (HAS_REMOTE)
+      return remote("adminGetActivities", { adminToken: adminToken() });
+    return null;
+  };
+  if (force) invalidate("activities:");
+  const result = await cached("activities:", load, CACHE_TTL.medium);
+  if (result) return result;
   if (!DEMO_MODE) requireBackend();
   return demoActivities.map((a, i) => ({
     ...a,
@@ -189,6 +201,8 @@ export async function getAdminActivities() {
   }));
 }
 export async function saveActivity(payload) {
+  invalidate("activities:");
+  invalidate("dashboard:");
   if (window.google?.script)
     return gasRun("adminSaveActivity", payload, adminToken());
   if (HAS_REMOTE)
@@ -198,6 +212,9 @@ export async function saveActivity(payload) {
 }
 export async function setActivityStatus(id, active) {
   const payload = { id, active };
+  invalidate("activities:");
+  invalidate("dashboard:");
+  invalidate("queue:"); // ending an activity holds its queued certificates
   if (window.google?.script)
     return gasRun("adminSetActivityStatus", payload, adminToken());
   if (HAS_REMOTE)
@@ -209,6 +226,8 @@ export async function setActivityStatus(id, active) {
   return { id, active };
 }
 export async function deleteActivity(id) {
+  invalidate("activities:");
+  invalidate("dashboard:");
   if (window.google?.script)
     return gasRun("adminDeleteActivity", id, adminToken());
   if (HAS_REMOTE)
@@ -296,6 +315,7 @@ export async function getAdminQuestions() {
   return demoQuestions;
 }
 export async function saveAdminQuestions(questions) {
+  invalidate("questions:");
   if (window.google?.script)
     return gasRun("adminSaveQuestions", questions, adminToken());
   if (HAS_REMOTE)
@@ -305,6 +325,78 @@ export async function saveAdminQuestions(questions) {
     });
   if (!DEMO_MODE) requireBackend();
   return questions;
+}
+export async function getAdminDashboard(
+  filters = {},
+  { force = false } = {},
+) {
+  const key = keyFor("dashboard", filters);
+  const load = () => {
+    if (window.google?.script)
+      return gasRun("adminGetDashboard", filters, adminToken());
+    if (HAS_REMOTE)
+      return remote("adminGetDashboard", { filters, adminToken: adminToken() });
+    return null;
+  };
+  if (force) invalidate(key);
+  const result = await cached(key, load, CACHE_TTL.short);
+  if (result) return result;
+  if (!DEMO_MODE) requireBackend();
+  return {
+    activities: await getAdminActivities(),
+    analytics: await getFeedbackAnalytics(filters.activityId || ""),
+  };
+}
+export async function getAdminResponses(filters = {}, { force = false } = {}) {
+  const key = keyFor("responses", filters);
+  const load = () => {
+    if (window.google?.script)
+      return gasRun("adminGetResponses", filters, adminToken());
+    if (HAS_REMOTE)
+      return remote("adminGetResponses", { filters, adminToken: adminToken() });
+    return null;
+  };
+  if (force) invalidate(key);
+  const result = await cached(key, load, CACHE_TTL.short);
+  if (result) return result;
+  if (!DEMO_MODE) requireBackend();
+  return { entries: [], total: 0 };
+}
+export async function getCertificateQueue(filters = {}, { force = false } = {}) {
+  const key = keyFor("queue", filters);
+  const load = () => {
+    if (window.google?.script)
+      return gasRun("adminGetCertificateQueue", filters, adminToken());
+    if (HAS_REMOTE)
+      return remote("adminGetCertificateQueue", {
+        filters,
+        adminToken: adminToken(),
+      });
+    return null;
+  };
+  if (force) invalidate(key);
+  const result = await cached(key, load, CACHE_TTL.short);
+  if (result) return result;
+  if (!DEMO_MODE) requireBackend();
+  return {
+    entries: [],
+    counts: { QUEUED: 0, PROCESSING: 0, ISSUED: 0, FAILED: 0 },
+    heldActivities: [],
+  };
+}
+export async function retryCertificates(rows) {
+  const payload = { rows };
+  invalidate("queue:");
+  invalidate("responses:");
+  if (window.google?.script)
+    return gasRun("adminRetryCertificates", payload, adminToken());
+  if (HAS_REMOTE)
+    return remote("adminRetryCertificates", {
+      payload,
+      adminToken: adminToken(),
+    });
+  if (!DEMO_MODE) requireBackend();
+  return { requeued: rows.length, skipped: [] };
 }
 export async function getAdminAuditLog(filters = {}) {
   if (window.google?.script)
@@ -332,6 +424,10 @@ export async function adminLogin(email, password, turnstileToken = "") {
         user: { email, name: "Portal Host", role: "superadmin" },
         expiresAt: Date.now() + 21600000,
       };
+  // Cached admin reads are scoped to whoever was signed in: activities carry
+  // per-user canManage flags, and responses carry participant data. Clear
+  // everything so a second admin in the same tab never sees the first's view.
+  invalidate();
   storeAdminSession(session);
   return session;
 }
@@ -340,6 +436,7 @@ export async function adminLogout() {
     if (HAS_REMOTE && adminToken())
       await remote("adminLogout", { adminToken: adminToken() });
   } finally {
+    invalidate();
     clearAdminSession();
   }
 }

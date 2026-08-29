@@ -34,8 +34,8 @@ function doGet(e) {
         '<!doctype html><meta charset="utf-8">' +
         '<style>body{font-family:system-ui,Segoe UI,Roboto,Arial,sans-serif;background:#f7f9fb;margin:0;padding:40px;color:#24323f}' +
         '.card{max-width:720px;margin:40px auto;background:#fff;border:1px solid #edf0f2;border-radius:14px;box-shadow:0 6px 14px rgba(10,30,60,.06);padding:22px}' +
-        'h1{margin:0 0 8px;font-size:1.35rem;color:#1b5e20} .muted{color:#6b7c93} a.btn{display:inline-block;margin-top:14px;padding:12px 16px;border-radius:12px;' +
-        'background:#eaf7ec;color:#1b5e20;text-decoration:none;border:1px solid #cfe0d0;font-weight:700}</style>' +
+        'h1{margin:0 0 8px;font-size:1.35rem;color:#1b305e} .muted{color:#6b7c93} a.btn{display:inline-block;margin-top:14px;padding:12px 16px;border-radius:12px;' +
+        'background:#eaeef7;color:#1b305e;text-decoration:none;border:1px solid #cfd4e0;font-weight:700}</style>' +
         '<div class="card"><h1>Forbidden</h1>' +
         '<p class="muted">You are not authorized to view this page.</p>' +
         '<div id="backWrap"><a class="btn" href="#" id="backBtn">← Back to survey</a></div>' +
@@ -46,7 +46,7 @@ function doGet(e) {
     }
   }
 
-  return HtmlService.createHtmlOutput('<meta name="viewport" content="width=device-width,initial-scale=1"><style>body{font-family:Arial,sans-serif;background:#f5f7f2;color:#18322d;display:grid;place-items:center;min-height:90vh}.card{text-align:center;background:white;border:1px solid #dfe7e1;border-radius:18px;padding:32px;max-width:480px}img{width:110px}p{color:#6d7f79}</style><div class="card"><img src="https://ik.imagekit.io/k2qmtccm6/CHED_Logo_New.png" alt="CHED"><h1>Participant Feedback API</h1><p>The certificate service is online. Use the Netlify portal to access the application.</p></div>')
+  return HtmlService.createHtmlOutput('<meta name="viewport" content="width=device-width,initial-scale=1"><style>body{font-family:Arial,sans-serif;background:#f2f4f7;color:#16213d;display:grid;place-items:center;min-height:90vh}.card{text-align:center;background:white;border:1px solid #dfe2e7;border-radius:18px;padding:32px;max-width:480px}img{width:110px}p{color:#6d737f}</style><div class="card"><img src="https://ik.imagekit.io/k2qmtccm6/CHED_Logo_New.png" alt="CHED"><h1>Participant Feedback API</h1><p>The certificate service is online. Use the Netlify portal to access the application.</p></div>')
     .setTitle('CHED Participant Feedback API')
     .setFaviconUrl('https://ik.imagekit.io/k2qmtccm6/CHED-cropped-logo100x100.png');
 }
@@ -84,6 +84,10 @@ function doPost(e) {
     else if (action === 'adminSaveUser') data = adminSaveUser(body.payload || {}, body.adminToken);
     else if (action === 'adminGetQuestions') data = adminGetQuestions(body.adminToken);
     else if (action === 'adminSaveQuestions') data = adminSaveQuestions(body.questions || (body.payload && body.payload.questions) || [], body.adminToken);
+    else if (action === 'adminGetDashboard') data = adminGetDashboard(body.filters || {}, body.adminToken);
+    else if (action === 'adminGetResponses') data = adminGetResponses(body.filters || {}, body.adminToken);
+    else if (action === 'adminGetCertificateQueue') data = adminGetCertificateQueue(body.filters || {}, body.adminToken);
+    else if (action === 'adminRetryCertificates') data = adminRetryCertificates(body.payload || {}, body.adminToken);
     else if (action === 'adminGetAuditLog') data = adminGetAuditLog(body.filters || {}, body.adminToken);
     else if (action === 'verifyCertificate') data = verifyCertificate(body.code);
     else throw new Error('Unknown action: ' + action);
@@ -461,14 +465,14 @@ function ensureSetupSheet_(ss, sheetName, columns) {
   });
   sh.setFrozenRows(1);
   if (sh.getLastColumn() > 0) {
-    sh.getRange(1,1,1,sh.getLastColumn()).setFontWeight('bold').setBackground('#0b4b3c').setFontColor('#ffffff');
+    sh.getRange(1,1,1,sh.getLastColumn()).setFontWeight('bold').setBackground('#0032a0').setFontColor('#ffffff');
     sh.autoResizeColumns(1,sh.getLastColumn());
   }
   return {sheet:sh,created:created,headersAdded:added};
 }
 
 // --------------------------- Tamper-evident audit log ---------------------------
-function isAuditedAction_(action) { return ['adminLogin','adminLogout','adminSaveActivity','adminSetActivityStatus','adminDeleteActivity','adminUploadSignature','adminSaveUser','adminSaveQuestions'].indexOf(action)>=0; }
+function isAuditedAction_(action) { return ['adminLogin','adminLogout','adminSaveActivity','adminSetActivityStatus','adminDeleteActivity','adminRetryCertificates','adminUploadSignature','adminSaveUser','adminSaveQuestions'].indexOf(action)>=0; }
 
 function auditActorForRequest_(action, body) {
   if(action==='adminLogin')return {email:safeTrim_(body.email).toLowerCase(),role:''};
@@ -487,6 +491,7 @@ function auditTargetForRequest_(action, body) {
   if(action==='adminSaveActivity')return {type:'activity',id:safeTrim_(payload.activityId||payload.id||payload.title),details:{operation:payload.id?'update':'create',title:safeTrim_(payload.title).slice(0,160)}};
   if(action==='adminSetActivityStatus')return {type:'activity',id:safeTrim_(payload.id),details:{operation:(payload.active===true||String(payload.active).toLowerCase()==='true')?'enable':'disable'}};
   if(action==='adminDeleteActivity')return {type:'activity',id:safeTrim_(body.id||(body.payload&&body.payload.id))};
+  if(action==='adminRetryCertificates')return {type:'certificate',id:(payload.rows||[]).join(','),details:{count:(payload.rows||[]).length}};
   if(action==='adminUploadSignature')return {type:'signature',id:safeTrim_(payload.filename).slice(0,180)};
   if(action==='adminSaveUser')return {type:'user',id:safeTrim_(payload.user_id||payload.email).toLowerCase(),details:{role:safeTrim_(payload.role).toLowerCase(),active:payload.active!==false}};
   if(action==='adminSaveQuestions')return {type:'survey',id:'Questions',details:{questionCount:(body.questions||(body.payload&&body.payload.questions)||[]).length}};
@@ -526,7 +531,25 @@ function forceAuditTimestampAsText_(sheet) {
   } catch (ignored) {}
 }
 
-function auditCanonical_(entry) { return [entry.timestamp,entry.audit_id,entry.actor_email,entry.actor_role,entry.action,entry.target_type,entry.target_id,entry.outcome,entry.details,entry.request_id,entry.previous_hash].map(safeTrim_).join('|'); }
+/**
+ * Rebuilds "yyyy-MM-dd HH:mm:ss" from whatever Sheets displays.
+ *
+ * Entries are hashed over that exact string, but Sheets coerces it to a
+ * datetime and getDisplayValues() renders it back without the leading zero on
+ * hours below 10 — so "08:00:38" returns as "8:00:38" and the row fails its
+ * own hash. Normalizing here repairs verification for rows already written,
+ * which pinning the column format cannot do.
+ */
+function normalizeAuditTimestamp_(value) {
+  var raw = safeTrim_(value);
+  var match = raw.match(/^(\d{4})-(\d{1,2})-(\d{1,2})[ T](\d{1,2}):(\d{1,2}):(\d{1,2})/);
+  if (!match) return raw;
+  function pad(part) { return part.length < 2 ? '0' + part : part; }
+  return match[1] + '-' + pad(match[2]) + '-' + pad(match[3]) + ' ' +
+         pad(match[4]) + ':' + pad(match[5]) + ':' + pad(match[6]);
+}
+
+function auditCanonical_(entry) { return [normalizeAuditTimestamp_(entry.timestamp),entry.audit_id,entry.actor_email,entry.actor_role,entry.action,entry.target_type,entry.target_id,entry.outcome,entry.details,entry.request_id,entry.previous_hash].map(safeTrim_).join('|'); }
 
 function appendAuditForRequest_(action, body, success, errorMessage, actor, requestContext) {
   var secret=PropertiesService.getScriptProperties().getProperty('AUDIT_HASH_SECRET');
@@ -1256,6 +1279,8 @@ function sendCertificateForResponse_(responsesRowIndex) {
   // preferred placeholder: it collapses a one-day activity to a single date
   // instead of "on <date> to <same date>".
   pres.replaceAllText('{{DateRange}}', activityDateRangeText_(aFrom, aTo));
+  // Handles templates that still spell out "on {{FromDate}} to {{ToDate}}".
+  collapseDateRangePhrase_(pres, aFrom, aTo);
   pres.replaceAllText('{{Date}}', fmtLongDate_(aDate));
   pres.replaceAllText('{{FromDate}}', fmtLongDate_(aFrom));
   pres.replaceAllText('{{ToDate}}', fmtLongDate_(aTo));
@@ -1333,9 +1358,77 @@ function sendCertificateForResponse_(responsesRowIndex) {
  * image is anchored at the token's estimated line, leaving surrounding text
  * intact.
  */
+/**
+ * Collapses a template's "on {{FromDate}} to {{ToDate}}" wording into one
+ * phrase, so a one-day activity does not read "on August 24, 2026 to
+ * August 24, 2026".
+ *
+ * The connecting words live in the template as static text, so replacing the
+ * tokens individually can never fix it. Instead the token pair is matched
+ * together, including the line break variants Slides uses (
+ for a paragraph
+ * break,  for a soft one) and the case where the line simply wraps.
+ *
+ * Returns true if a combined phrase was found; the caller still replaces the
+ * individual tokens afterwards for templates that use them separately.
+ */
+function collapseDateRangePhrase_(presentation, fromKey, toKey) {
+  var phrase = activityDateRangeText_(fromKey, toKey);
+  if (!phrase) return false;
+  var bare = phrase.replace(/^(on|from)\s+/i, '');
+  var NL = String.fromCharCode(10), VT = String.fromCharCode(11);
+  var joiners = [' to ', NL + 'to ', VT + 'to ', ' ' + NL + 'to ', ' ' + VT + 'to ', ' to' + NL, ' to' + VT];
+  var prefixes = ['on ', 'from ', ''];
+
+  for (var p = 0; p < prefixes.length; p++) {
+    for (var j = 0; j < joiners.length; j++) {
+      var find = prefixes[p] + '{{FromDate}}' + joiners[j] + '{{ToDate}}';
+      var replacement = prefixes[p] ? phrase : bare;
+      try {
+        if (presentation.replaceAllText(find, replacement) > 0) return true;
+      } catch (ignored) {}
+    }
+  }
+  return false;
+}
+
 function replaceImagePlaceholder_(presentation, token, blob, options) {
   options = options || {};
   var placed = false;
+  var pageWidth = presentation.getPageWidth(), pageHeight = presentation.getPageHeight();
+
+  // Keeps an image on the slide and, for codes that must stay readable,
+  // square and no smaller than minSize points.
+  function fit_(left, top, width, height) {
+    if (options.square) {
+      var side = Math.max(Math.min(width, height), options.minSize || 0);
+      width = side; height = side;
+    } else {
+      if (options.minSize && width < options.minSize) width = options.minSize;
+      if (options.minSize && height < options.minSize) height = options.minSize;
+    }
+    if (left + width > pageWidth) left = Math.max(0, pageWidth - width);
+    if (top + height > pageHeight) top = Math.max(0, pageHeight - height);
+    return { left: Math.max(0, left), top: Math.max(0, top), width: width, height: height };
+  }
+
+  // insertImage(blob, left, top, w, h) stretches the image to exactly w x h.
+  // A signature squeezed to a computed box looks wrong, and a QR that is not
+  // square may not scan, so fit inside the box and keep the aspect ratio.
+  function insertFitted_(slide, box) {
+    var image = slide.insertImage(blob, box.left, box.top, box.width, box.height);
+    try {
+      var naturalWidth = image.getInherentWidth(), naturalHeight = image.getInherentHeight();
+      if (!naturalWidth || !naturalHeight) return image;
+      var scale = Math.min(box.width / naturalWidth, box.height / naturalHeight);
+      var fittedWidth = naturalWidth * scale, fittedHeight = naturalHeight * scale;
+      image.setWidth(fittedWidth).setHeight(fittedHeight);
+      image.setLeft(box.left + (box.width - fittedWidth) / 2);
+      image.setTop(box.top + (box.height - fittedHeight) / 2);
+    } catch (ignored) {}
+    return image;
+  }
+
   presentation.getSlides().forEach(function(slide){
     slide.getShapes().forEach(function(shape){
       try {
@@ -1346,9 +1439,10 @@ function replaceImagePlaceholder_(presentation, token, blob, options) {
         var width = shape.getWidth(), height = shape.getHeight();
 
         if (safeTrim_(text) === token) {
-          // The placeholder owns the whole box: exact placement.
+          // The placeholder owns the whole box: use its rectangle.
+          var exact = fit_(left, top, width, height);
           shape.remove();
-          slide.insertImage(blob, left, top, width, height);
+          insertFitted_(slide, exact);
           placed = true;
           return;
         }
@@ -1361,10 +1455,11 @@ function replaceImagePlaceholder_(presentation, token, blob, options) {
         var imageHeight = Math.max(lineHeight, height * (options.heightRatio || 0.25));
         var imageWidth = width * (options.widthRatio || 0.35);
         var imageLeft = left + (options.align === 'left' ? 0 : (width - imageWidth) / 2);
-        var imageTop = top + (lineIndex * lineHeight) - (imageHeight - lineHeight) / 2;
+        var imageTop = Math.max(top, top + (lineIndex * lineHeight) - (imageHeight - lineHeight) / 2);
 
+        var box = fit_(imageLeft, imageTop, imageWidth, imageHeight);
         shape.getText().replaceAllText(token, '');
-        slide.insertImage(blob, imageLeft, Math.max(top, imageTop), imageWidth, imageHeight);
+        insertFitted_(slide, box);
         placed = true;
       } catch (ignored) {}
     });
@@ -1380,14 +1475,22 @@ function replaceSignaturePlaceholder_(presentation, signatureUrl) {
 function replaceQrPlaceholder_(presentation, verificationUrl) {
   var blob;
   try {
-    blob = UrlFetchApp.fetch('https://quickchart.io/qr?size=300&margin=2&text=' + encodeURIComponent(verificationUrl))
+    // margin is the quiet zone in modules. The QR spec requires 4; shrinking it
+    // to gain apparent size is what makes codes fail to scan. ecLevel M keeps
+    // ~15% error correction, which matters on a printed page.
+    blob = UrlFetchApp.fetch('https://quickchart.io/qr?size=600&margin=4&ecLevel=M&text=' + encodeURIComponent(verificationUrl))
       .getBlob().setName('verification-qr.png');
   } catch (fetchError) {
     // No QR service: strip the token so the certificate does not print it raw.
     try { presentation.replaceAllText('{{QRCode}}', ''); } catch (ignored) {}
     return false;
   }
-  return replaceImagePlaceholder_(presentation, '{{QRCode}}', blob, { heightRatio: 0.3, widthRatio: 0.18, align: 'left' });
+  // A QR must stay square, and roughly 1.5in (110pt) is the smallest a phone
+  // camera reads reliably off a printed page. Sizing it from the text box's
+  // width produced a stretched ~20pt code that could not be scanned at all.
+  return replaceImagePlaceholder_(presentation, '{{QRCode}}', blob, {
+    align: 'left', square: true, minSize: 110, heightRatio: 1, widthRatio: 1
+  });
 }
 
 // --------------------- Drive REST helpers ----------------------------
@@ -1946,6 +2049,9 @@ function adminSaveUser(payload, adminToken) {
     if (!existing && password.length < 12) throw new Error('New users require a password of at least 12 characters.');
     if (password && password.length < 12) throw new Error('Passwords must contain at least 12 characters.');
     if (password) seedUser(email, password, name, role, active); else syncCredentialMetadata_({email:email,name:name,role:role,active:active});
+    // Drop the cached lookup so a deactivation or role change is enforced on
+    // the account's very next request rather than after the TTL.
+    invalidateCredentialUser_(email);
     return upsertWhitelistUser_({user_id:safeTrim_(payload.user_id),name:name,role:role,email:email,active:active});
   } finally { lock.releaseLock(); }
 }
@@ -2041,7 +2147,8 @@ function seedUser(email, password, displayName, role, active) {
     setupColumn_('Email'),setupColumn_('PasswordHash',['password hash']),setupColumn_('Salt'),
     setupColumn_('Name',['display name']),setupColumn_('Role'),setupColumn_('Active'),setupColumn_('CreatedAt',['created at'])
   ]),sh=setup.sheet,hdr=getHeaderMap_(sh),row=findRowByEmail_(sh,email);
-  var salt=Utilities.getUuid()+Utilities.getUuid(),hash=hashAdminPassword_(password,salt),lastCol=sh.getLastColumn();
+  invalidateCredentialUser_(email);
+  var salt=Utilities.getUuid()+Utilities.getUuid(),hash=hashAdminPasswordV2_(password,salt),lastCol=sh.getLastColumn();
   var values=row?sh.getRange(row,1,1,lastCol).getValues()[0]:new Array(lastCol).fill('');
   function put(names,value){var col=idxOf_(hdr,names);if(col>=0)values[col]=safeSheetValue_(value);}
   put(['email'],email);put(['passwordhash','password hash'],hash);put(['salt'],salt);put(['name','display name'],displayName||email);
@@ -2060,8 +2167,12 @@ function adminLogin(email,password) {
   if(!sh||sh.getLastRow()<2)throw new Error('Invalid email or password.');
   var hdr=getHeaderMap_(sh),rows=sh.getRange(2,1,sh.getLastRow()-1,sh.getLastColumn()).getValues();
   var cEmail=idxOf_(hdr,['email']),cHash=idxOf_(hdr,['passwordhash','password hash']),cSalt=idxOf_(hdr,['salt']),cName=idxOf_(hdr,['name','display name']),cRole=idxOf_(hdr,['role']),cActive=idxOf_(hdr,['active']);
-  var match=null;for(var i=0;i<rows.length;i++)if(safeTrim_(rows[i][cEmail]).toLowerCase()===email){match=rows[i];break;}
-  if(!match||String(match[cActive]).toLowerCase()==='false'||!constantTimeEquals_(hashAdminPassword_(password,match[cSalt]),safeTrim_(match[cHash])))throw new Error('Invalid email or password.');
+  var match=null,matchRow=-1;for(var i=0;i<rows.length;i++)if(safeTrim_(rows[i][cEmail]).toLowerCase()===email){match=rows[i];matchRow=i+2;break;}
+  if(!match||String(match[cActive]).toLowerCase()==='false')throw new Error('Invalid email or password.');
+  var verified=verifyAdminPassword_(password,match[cSalt],match[cHash]);
+  if(!verified.ok)throw new Error('Invalid email or password.');
+  // Re-store legacy hashes in the fast format so the slow path runs once.
+  if(verified.upgrade&&cHash>=0&&matchRow>1){try{sh.getRange(matchRow,cHash+1).setValue(hashAdminPasswordV2_(password,match[cSalt]));}catch(ignored){}}
   cache.remove(throttleKey);
   var token=Utilities.getUuid().replace(/-/g,'')+Utilities.getUuid().replace(/-/g,''),session={email:email,name:safeTrim_(match[cName])||email,role:safeTrim_(match[cRole])||'admin',expiresAt:Date.now()+21600000};
   var key=adminSessionKey_(token),json=JSON.stringify(session);CacheService.getScriptCache().put(key,json,21600);PropertiesService.getScriptProperties().setProperty(key,json);
@@ -2086,7 +2197,29 @@ function getAdminSession_(token){
     return session;
   }catch(_){return null;}
 }
+/**
+ * Cached for 30s. getAdminSession_ calls this on every admin request, so
+ * without it each request pays a row scan plus a range read on the Users
+ * sheet. adminSaveUser clears the entry, so deactivating an account through
+ * the UI takes effect immediately; only an edit made directly in the
+ * spreadsheet can lag, and by at most the TTL.
+ */
+function credentialUserCacheKey_(email){return 'CREDENTIAL_USER_'+sha256Base64_(safeTrim_(email).toLowerCase()).slice(0,32);}
+
+function invalidateCredentialUser_(email){
+  try{CacheService.getScriptCache().remove(credentialUserCacheKey_(email));}catch(ignored){}
+}
+
 function getCredentialUser_(email){
+  email=safeTrim_(email).toLowerCase();
+  var cacheKey=credentialUserCacheKey_(email),cache=CacheService.getScriptCache();
+  try{var hit=cache.get(cacheKey);if(hit)return JSON.parse(hit);}catch(ignored){}
+  var user=readCredentialUser_(email);
+  try{if(user)cache.put(cacheKey,JSON.stringify(user),30);}catch(ignored){}
+  return user;
+}
+
+function readCredentialUser_(email){
   email=safeTrim_(email).toLowerCase();
   var sh=SpreadsheetApp.getActiveSpreadsheet().getSheetByName('Users');
   if(!sh||sh.getLastRow()<2)return null;
@@ -2097,7 +2230,54 @@ function getCredentialUser_(email){
 }
 function adminSessionKey_(token){var secret=PropertiesService.getScriptProperties().getProperty('SESSION_HASH_SECRET');if(!secret)throw new Error('Session security is not configured. Run setupParticipantFeedbackSecurity().');return'ADMIN_SESSION_'+hmac256Base64_(String(token||''),secret);}
 function adminLoginThrottleKey_(email){var digest=Utilities.computeDigest(Utilities.DigestAlgorithm.SHA_256,String(email||'unknown'),Utilities.Charset.UTF_8);return'LOGIN_ATTEMPTS_'+Utilities.base64EncodeWebSafe(digest).replace(/=+$/,'').slice(0,32);}
-function hashAdminPassword_(password,salt){var value=String(salt||'')+'|'+String(password||'');for(var i=0;i<12000;i++){var digest=Utilities.computeDigest(Utilities.DigestAlgorithm.SHA_256,value,Utilities.Charset.UTF_8);value=Utilities.base64EncodeWebSafe(digest);}return value;}
+/**
+ * LEGACY password hash: 12,000 rounds of SHA-256. Each round is two Apps
+ * Script API calls, so a single verification cost several seconds of wall
+ * clock — the reason signing in felt frozen. Kept only to verify passwords
+ * stored in the old format; they are upgraded on the next successful login.
+ */
+function hashAdminPasswordLegacy_(password,salt){var value=String(salt||'')+'|'+String(password||'');for(var i=0;i<12000;i++){var digest=Utilities.computeDigest(Utilities.DigestAlgorithm.SHA_256,value,Utilities.Charset.UTF_8);value=Utilities.base64EncodeWebSafe(digest);}return value;}
+
+/**
+ * Secret mixed into every password hash, kept in Script Properties rather than
+ * the spreadsheet. The iteration count above existed to slow an attacker who
+ * obtained the Users sheet; a pepper defeats that attack outright, because the
+ * sheet alone cannot be tested against without this value.
+ */
+function passwordPepper_() {
+  var properties = PropertiesService.getScriptProperties();
+  var pepper = properties.getProperty('PASSWORD_PEPPER');
+  if (!pepper) { pepper = randomSecret_(); properties.setProperty('PASSWORD_PEPPER', pepper); }
+  return pepper;
+}
+
+/** Current format: one HMAC-SHA256, milliseconds instead of seconds. */
+function hashAdminPasswordV2_(password, salt) {
+  return 'v2:' + hmac256Base64_(String(salt || '') + '|' + String(password || ''), passwordPepper_());
+}
+
+/**
+ * Verifies against either format. Returns {ok, upgrade}; `upgrade` means the
+ * password was stored in the slow legacy format and the caller should rewrite
+ * it, so each account pays the old cost at most once more.
+ */
+function verifyAdminPassword_(password, salt, storedHash) {
+  storedHash = safeTrim_(storedHash);
+  if (storedHash.indexOf('v2:') === 0)
+    return { ok: constantTimeEquals_(hashAdminPasswordV2_(password, salt), storedHash), upgrade: false };
+  var ok = constantTimeEquals_(hashAdminPasswordLegacy_(password, salt), storedHash);
+  return { ok: ok, upgrade: ok };
+}
+
+/** Times both formats. Run from the editor to see the difference. */
+function benchmarkLoginHash() {
+  var salt = Utilities.getUuid(), password = 'benchmark-password-only';
+  var t0 = Date.now(); hashAdminPasswordLegacy_(password, salt); var legacy = Date.now() - t0;
+  var t1 = Date.now(); hashAdminPasswordV2_(password, salt); var v2 = Date.now() - t1;
+  var result = { legacyMs: legacy, currentMs: v2, timesFaster: v2 ? Math.round(legacy / Math.max(1, v2)) : 'n/a' };
+  Logger.log(JSON.stringify(result, null, 2));
+  return result;
+}
 function constantTimeEquals_(a,b){a=String(a||'');b=String(b||'');var diff=a.length^b.length,len=Math.max(a.length,b.length);for(var i=0;i<len;i++)diff|=(a.charCodeAt(i%Math.max(1,a.length))||0)^(b.charCodeAt(i%Math.max(1,b.length))||0);return diff===0;}
 
 // =====================================================================
@@ -2348,47 +2528,276 @@ function buildCertificateEmail_(data) {
     'Commission on Higher Education';
 
   var html =
-    '<div style="margin:0;padding:24px 12px;background:#f5f7f2;font-family:Arial,Helvetica,sans-serif;">' +
-      '<table role="presentation" cellpadding="0" cellspacing="0" border="0" width="100%" style="max-width:600px;margin:0 auto;background:#ffffff;border:1px solid #dfe7e1;border-radius:14px;overflow:hidden;">' +
-        '<tr><td style="background:#0b4b3c;padding:20px 28px;">' +
+    '<div style="margin:0;padding:24px 12px;background:#f2f4f7;font-family:Arial,Helvetica,sans-serif;">' +
+      '<table role="presentation" cellpadding="0" cellspacing="0" border="0" width="100%" style="max-width:600px;margin:0 auto;background:#ffffff;border:1px solid #dfe2e7;border-radius:14px;overflow:hidden;">' +
+        '<tr><td style="background:#0032a0;padding:20px 28px;">' +
           '<table role="presentation" cellpadding="0" cellspacing="0" border="0"><tr>' +
             '<td style="padding-right:12px;"><img src="https://ik.imagekit.io/k2qmtccm6/CHED-cropped-logo100x100.png" width="40" height="40" alt="CHED" style="display:block;border:0;"></td>' +
             '<td style="color:#ffffff;font-size:14px;font-weight:bold;line-height:1.3;">Commission on Higher Education' +
-              '<div style="color:#b9d1c9;font-size:11px;font-weight:normal;">Office of Student Development and Services</div>' +
+              '<div style="color:#b9c1d1;font-size:11px;font-weight:normal;">Office of Student Development and Services</div>' +
             '</td>' +
           '</tr></table>' +
         '</td></tr>' +
         '<tr><td style="padding:30px 28px 8px;">' +
-          '<div style="text-transform:uppercase;letter-spacing:.12em;font-size:11px;font-weight:bold;color:#36836c;">Certificate of Participation</div>' +
-          '<h1 style="margin:10px 0 0;font-size:22px;line-height:1.25;color:#143f34;">Your certificate is ready</h1>' +
+          '<div style="text-transform:uppercase;letter-spacing:.12em;font-size:11px;font-weight:bold;color:#364e83;">Certificate of Participation</div>' +
+          '<h1 style="margin:10px 0 0;font-size:22px;line-height:1.25;color:#001f5c;">Your certificate is ready</h1>' +
         '</td></tr>' +
-        '<tr><td style="padding:14px 28px 0;color:#3c4f49;font-size:14px;line-height:1.65;">' +
+        '<tr><td style="padding:14px 28px 0;color:#3c424f;font-size:14px;line-height:1.65;">' +
           '<p style="margin:0 0 14px;">Dear ' + escapeHtml_(firstName) + ',</p>' +
-          '<p style="margin:0 0 14px;">Thank you for taking part in <strong style="color:#143f34;">' + escapeHtml_(title) + '</strong>' + escapeHtml_(whenWhere) + ', and for sharing your feedback.</p>' +
+          '<p style="margin:0 0 14px;">Thank you for taking part in <strong style="color:#001f5c;">' + escapeHtml_(title) + '</strong>' + escapeHtml_(whenWhere) + ', and for sharing your feedback.</p>' +
         '</td></tr>' +
         '<tr><td style="padding:12px 28px 4px;">' +
-          '<table role="presentation" cellpadding="0" cellspacing="0" border="0"><tr><td style="background:#0b4b3c;border-radius:10px;">' +
+          '<table role="presentation" cellpadding="0" cellspacing="0" border="0"><tr><td style="background:#0032a0;border-radius:10px;">' +
             '<a href="' + escapeHtml_(certificateUrl) + '" style="display:inline-block;padding:13px 26px;color:#ffffff;font-size:14px;font-weight:bold;text-decoration:none;">Open your certificate (PDF)</a>' +
           '</td></tr></table>' +
         '</td></tr>' +
         '<tr><td style="padding:20px 28px 4px;">' +
-          '<table role="presentation" cellpadding="0" cellspacing="0" border="0" width="100%" style="background:#f1f7f0;border:1px solid #dce9da;border-radius:10px;">' +
-            '<tr><td style="padding:14px 16px;font-size:13px;color:#3c4f49;line-height:1.6;">' +
-              '<div style="font-size:11px;text-transform:uppercase;letter-spacing:.08em;color:#6d7f79;font-weight:bold;">Verification code</div>' +
-              '<div style="font-family:Consolas,Menlo,monospace;font-size:15px;color:#143f34;font-weight:bold;padding:4px 0;">' + escapeHtml_(code) + '</div>' +
-              '<a href="' + escapeHtml_(verifyUrl) + '" style="color:#0b4b3c;font-size:12px;">Confirm this certificate is genuine</a>' +
+          '<table role="presentation" cellpadding="0" cellspacing="0" border="0" width="100%" style="background:#f0f2f7;border:1px solid #dadfe9;border-radius:10px;">' +
+            '<tr><td style="padding:14px 16px;font-size:13px;color:#3c424f;line-height:1.6;">' +
+              '<div style="font-size:11px;text-transform:uppercase;letter-spacing:.08em;color:#6d737f;font-weight:bold;">Verification code</div>' +
+              '<div style="font-family:Consolas,Menlo,monospace;font-size:15px;color:#001f5c;font-weight:bold;padding:4px 0;">' + escapeHtml_(code) + '</div>' +
+              '<a href="' + escapeHtml_(verifyUrl) + '" style="color:#0032a0;font-size:12px;">Confirm this certificate is genuine</a>' +
             '</td></tr>' +
           '</table>' +
         '</td></tr>' +
-        '<tr><td style="padding:18px 28px 26px;color:#6d7f79;font-size:12px;line-height:1.6;">' +
+        '<tr><td style="padding:18px 28px 26px;color:#6d737f;font-size:12px;line-height:1.6;">' +
           '<p style="margin:0 0 6px;">Please keep this email for your records. If the button does not work, copy this link:<br>' +
-            '<span style="color:#3c4f49;word-break:break-all;">' + escapeHtml_(certificateUrl) + '</span></p>' +
+            '<span style="color:#3c424f;word-break:break-all;">' + escapeHtml_(certificateUrl) + '</span></p>' +
         '</td></tr>' +
-        '<tr><td style="background:#f8faf7;border-top:1px solid #edf0ed;padding:16px 28px;color:#6d7f79;font-size:11px;line-height:1.5;">' +
+        '<tr><td style="background:#f7f8fa;border-top:1px solid #edeef0;padding:16px 28px;color:#6d737f;font-size:11px;line-height:1.5;">' +
           'Office of Student Development and Services<br>Commission on Higher Education' +
         '</td></tr>' +
       '</table>' +
     '</div>';
 
   return { subject: subject, text: text, html: html };
+}
+
+// ============================ Responses & certificates ============================
+
+/** Shared column lookup for the Responses sheet. */
+function responseColumns_(hdr) {
+  return {
+    timestamp: idxOf_(hdr, ['timestamp','submitted at']),
+    name: idxOf_(hdr, ['name']),
+    email: idxOf_(hdr, ['responder email','email','e-mail']),
+    sex: idxOf_(hdr, ['sex']),
+    age: idxOf_(hdr, ['age']),
+    activityId: idxOf_(hdr, ['activityid','activity id','id']),
+    title: idxOf_(hdr, ['title of activity','title','activity title','activity']),
+    venue: idxOf_(hdr, ['venue','location']),
+    activityDate: idxOf_(hdr, ['activity_date','date of activity']),
+    takeaways: idxOf_(hdr, ['takeaways','key takeaways','most valuable takeaway']),
+    suggestions: idxOf_(hdr, ['suggestions','recommendations','improvements']),
+    status: idxOf_(hdr, ['cstatus','status','processing status']),
+    emailSent: idxOf_(hdr, ['email sent','emailsent','email_sent','sent','date emailed']),
+    certificate: idxOf_(hdr, ['certificate link','certificate','cert link','certificate url']),
+    verificationCode: idxOf_(hdr, ['verification code','verification id','certificate id'])
+  };
+}
+
+/** Maps the raw status cell to a state the admin UI can group by. */
+function certificateState_(rawStatus) {
+  var status = safeTrim_(rawStatus).toUpperCase();
+  if (status.indexOf('ERROR') === 0)
+    return { state: 'FAILED', detail: safeTrim_(rawStatus).replace(/^ERROR:\s*/i, '') };
+  if (status === 'OK') return { state: 'ISSUED', detail: '' };
+  if (status === 'PROCESSING') return { state: 'PROCESSING', detail: '' };
+  if (status === 'PENDING') return { state: 'QUEUED', detail: '' };
+  return { state: status || 'UNKNOWN', detail: '' };
+}
+
+function responseCellValue_(row, index) {
+  return index >= 0 && index < row.length ? row[index] : '';
+}
+
+function responseTimestamp_(value) {
+  return value instanceof Date
+    ? Utilities.formatDate(value, Session.getScriptTimeZone() || 'Asia/Manila', 'yyyy-MM-dd HH:mm')
+    : safeTrim_(value);
+}
+
+/**
+ * Participant responses for the admin table, newest first.
+ * filters: {activityId, query, state, limit}
+ */
+function adminGetResponses(filters, adminToken) {
+  if (!isAdminAuthorized_(adminToken)) throw new Error('Forbidden: administrator authorization required.');
+  filters = filters || {};
+  var sh = SpreadsheetApp.getActiveSpreadsheet().getSheetByName('Responses');
+  if (!sh || sh.getLastRow() < 2) return { entries: [], total: 0 };
+
+  var hdr = getHeaderMap_(sh), cols = responseColumns_(hdr);
+  var values = sh.getRange(2, 1, sh.getLastRow() - 1, sh.getLastColumn()).getValues();
+  var meta = questionTypesSafe_();
+  var answerCols = [];
+  for (var q = 1; q <= 15; q++) answerCols.push(idxOf_(hdr, ['answer' + q, 'q' + q, 'question' + q]));
+
+  var wantActivity = safeTrim_(filters.activityId).toLowerCase();
+  var wantState = safeTrim_(filters.state).toUpperCase();
+  var query = safeTrim_(filters.query).toLowerCase();
+
+  var entries = [];
+  for (var i = 0; i < values.length; i++) {
+    var row = values[i];
+    var activityId = safeTrim_(responseCellValue_(row, cols.activityId));
+    if (wantActivity && activityId.toLowerCase() !== wantActivity) continue;
+
+    var certificate = certificateState_(responseCellValue_(row, cols.status));
+    if (wantState && certificate.state !== wantState) continue;
+
+    var name = safeTrim_(responseCellValue_(row, cols.name));
+    var email = safeTrim_(responseCellValue_(row, cols.email));
+    var title = safeTrim_(responseCellValue_(row, cols.title));
+    if (query && [name, email, title, activityId].join(' ').toLowerCase().indexOf(query) < 0) continue;
+
+    var answers = [], ratingTotal = 0, ratingCount = 0;
+    for (var a = 0; a < 15; a++) {
+      var value = safeTrim_(responseCellValue_(row, answerCols[a]));
+      var type = normalizeQuestionType_(meta['type' + (a + 1)]);
+      answers.push({ number: a + 1, type: type, value: value });
+      var score = Number(value);
+      if (type === 'rating' && score >= 1 && score <= 5) { ratingTotal += score; ratingCount++; }
+    }
+
+    entries.push({
+      row: i + 2,
+      submittedAt: responseTimestamp_(responseCellValue_(row, cols.timestamp)),
+      name: name,
+      email: email,
+      sex: safeTrim_(responseCellValue_(row, cols.sex)),
+      age: safeTrim_(responseCellValue_(row, cols.age)),
+      activityId: activityId,
+      title: title,
+      activityDate: fmtDate_(responseCellValue_(row, cols.activityDate)),
+      takeaways: safeTrim_(responseCellValue_(row, cols.takeaways)),
+      suggestions: safeTrim_(responseCellValue_(row, cols.suggestions)),
+      answers: answers,
+      averageRating: ratingCount ? Number((ratingTotal / ratingCount).toFixed(2)) : 0,
+      certificateState: certificate.state,
+      certificateError: certificate.detail,
+      certificateUrl: safeTrim_(responseCellValue_(row, cols.certificate)),
+      verificationCode: safeTrim_(responseCellValue_(row, cols.verificationCode)),
+      emailSent: safeTrim_(responseCellValue_(row, cols.emailSent))
+    });
+  }
+
+  var limit = Math.min(500, Math.max(25, Number(filters.limit) || 200));
+  entries.reverse();
+  return { entries: entries.slice(0, limit), total: entries.length };
+}
+
+/**
+ * Certificate queue health, grouped the way an admin needs to act on it:
+ * QUEUED (waiting), ISSUED (done), FAILED (needs a retry).
+ */
+function adminGetCertificateQueue(filters, adminToken) {
+  if (!isAdminAuthorized_(adminToken)) throw new Error('Forbidden: administrator authorization required.');
+  filters = filters || {};
+  var sh = SpreadsheetApp.getActiveSpreadsheet().getSheetByName('Responses');
+  var empty = { entries: [], counts: { QUEUED: 0, PROCESSING: 0, ISSUED: 0, FAILED: 0 }, heldActivities: [] };
+  if (!sh || sh.getLastRow() < 2) return empty;
+
+  var hdr = getHeaderMap_(sh), cols = responseColumns_(hdr);
+  var values = sh.getRange(2, 1, sh.getLastRow() - 1, sh.getLastColumn()).getValues();
+  var disabled = disabledActivityKeys_();
+  var wantState = safeTrim_(filters.state).toUpperCase() || 'FAILED';
+  var wantActivity = safeTrim_(filters.activityId).toLowerCase();
+
+  var counts = { QUEUED: 0, PROCESSING: 0, ISSUED: 0, FAILED: 0 };
+  var entries = [], held = {};
+
+  for (var i = 0; i < values.length; i++) {
+    var row = values[i];
+    var activityId = safeTrim_(responseCellValue_(row, cols.activityId));
+    var title = safeTrim_(responseCellValue_(row, cols.title));
+
+    // Apply the activity filter before counting, or the tab badges would
+    // describe every activity while the table below shows only one.
+    if (wantActivity && activityId.toLowerCase() !== wantActivity) continue;
+
+    var certificate = certificateState_(responseCellValue_(row, cols.status));
+    if (certificate.state in counts) counts[certificate.state]++;
+
+    // A queued row whose activity is switched off will never be picked up by
+    // processCertificateQueue, so surface it rather than let it sit silently.
+    var isHeld = certificate.state === 'QUEUED' &&
+      ((activityId && disabled.ids[activityId.toLowerCase()]) ||
+       (title && disabled.titles[title.toLowerCase()]));
+    if (isHeld && title) held[title] = true;
+
+    if (certificate.state !== wantState) continue;
+
+    entries.push({
+      row: i + 2,
+      name: safeTrim_(responseCellValue_(row, cols.name)),
+      email: safeTrim_(responseCellValue_(row, cols.email)),
+      activityId: activityId,
+      title: title,
+      activityDate: fmtDate_(responseCellValue_(row, cols.activityDate)),
+      submittedAt: responseTimestamp_(responseCellValue_(row, cols.timestamp)),
+      state: certificate.state,
+      error: certificate.detail,
+      held: isHeld,
+      certificateUrl: safeTrim_(responseCellValue_(row, cols.certificate)),
+      emailSent: safeTrim_(responseCellValue_(row, cols.emailSent))
+    });
+  }
+  entries.reverse();
+  return { entries: entries.slice(0, 300), counts: counts, heldActivities: Object.keys(held) };
+}
+
+/**
+ * Put failed rows back in the queue. Setting the status to PENDING is all that
+ * is needed: processCertificateQueue picks them up on its next run.
+ *
+ * Only FAILED rows may be retried. Re-queueing an ISSUED row would generate a
+ * second certificate and email the participant again.
+ */
+function adminRetryCertificates(payload, adminToken) {
+  if (!isAdminAuthorized_(adminToken)) throw new Error('Forbidden: administrator authorization required.');
+  payload = payload || {};
+  var rows = payload.rows;
+  if (!Array.isArray(rows) || !rows.length) throw new Error('Select at least one certificate to retry.');
+  if (rows.length > 100) throw new Error('Retry up to 100 certificates at a time.');
+
+  var sh = SpreadsheetApp.getActiveSpreadsheet().getSheetByName('Responses');
+  if (!sh) throw new Error("Sheet 'Responses' not found.");
+  var hdr = getHeaderMap_(sh), cStatus = idxOf_(hdr, ['cstatus','status','processing status']);
+  if (cStatus < 0) throw new Error('Responses processing-status column is required.');
+
+  var lock = LockService.getScriptLock();
+  if (!lock.tryLock(10000)) throw new Error('The certificate queue is busy. Try again in a moment.');
+  var requeued = 0, skipped = [];
+  try {
+    var lastRow = sh.getLastRow();
+    for (var i = 0; i < rows.length; i++) {
+      var rowIndex = parseInt(String(rows[i]), 10);
+      if (!isFinite(rowIndex) || rowIndex < 2 || rowIndex > lastRow) { skipped.push(rows[i]); continue; }
+      var current = certificateState_(sh.getRange(rowIndex, cStatus + 1).getValue());
+      if (current.state !== 'FAILED') { skipped.push(rowIndex); continue; }
+      sh.getRange(rowIndex, cStatus + 1).setValue('PENDING');
+      requeued++;
+    }
+  } finally {
+    try { lock.releaseLock(); } catch (ignored) {}
+  }
+  return { requeued: requeued, skipped: skipped };
+}
+
+/**
+ * Everything the admin dashboard needs on first paint, in one request.
+ *
+ * The client used to fire adminGetActivities and adminGetFeedbackAnalytics as
+ * two calls. Each is a Netlify function hop plus its own Apps Script execution
+ * — including a cold start and a fresh session lookup — so the dashboard paid
+ * that overhead twice for data it always needs together.
+ */
+function adminGetDashboard(filters, adminToken) {
+  if (!isAdminAuthorized_(adminToken)) throw new Error('Forbidden: administrator authorization required.');
+  filters = filters || {};
+  return {
+    activities: adminGetActivities(adminToken),
+    analytics: adminGetFeedbackAnalytics(safeTrim_(filters.activityId), adminToken)
+  };
 }

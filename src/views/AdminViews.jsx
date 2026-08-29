@@ -1,6 +1,7 @@
 import React, { useEffect, useMemo, useRef, useState } from "react";
 import {
   Check,
+  ChevronDown,
   ClipboardList,
   Download,
   FileCheck2,
@@ -9,6 +10,7 @@ import {
   LogIn,
   LogOut,
   Plus,
+  RefreshCw,
   Search,
   ShieldCheck,
   Sparkles,
@@ -22,7 +24,10 @@ import {
   adminLogout,
   deleteActivity,
   setActivityStatus,
-  getAdminActivities,
+  getAdminDashboard,
+  getAdminResponses,
+  getCertificateQueue,
+  retryCertificates,
   getAdminAuditLog,
   getAdminQuestions,
   getAdminUsers,
@@ -33,7 +38,7 @@ import {
   saveAdminUser,
   uploadSignature,
 } from "../lib/api";
-import { Brand, TurnstileWidget } from "./shared";
+import { Brand, Skeleton, SkeletonTable, Tooltip, TurnstileWidget } from "./shared";
 
 const NOT_OWNER_HINT =
   "Only the administrator who created this activity, or a superadmin, can edit, end, or delete it.";
@@ -124,10 +129,12 @@ export function AdminDashboard() {
     [activityFilter, setActivityFilter] = useState(""),
     [session, setSession] = useState(readAdminSession),
     [adminError, setAdminError] = useState("");
-  const load = () => {
+  const load = (force = false) => {
     setAdminError("");
-    return Promise.all([getAdminActivities(), getFeedbackAnalytics()])
-      .then(([activities, scores]) => {
+    // One request instead of two: each round trip is a Netlify hop plus its
+    // own Apps Script execution, and the dashboard always needs both halves.
+    return getAdminDashboard({ activityId: "" }, { force })
+      .then(({ activities, analytics: scores }) => {
         setRows(activities);
         setAnalytics(scores);
       })
@@ -146,12 +153,12 @@ export function AdminDashboard() {
     if (session) load();
   }, [session]);
   useEffect(() => {
-    if (session) {
-      setAdminError("");
-      getFeedbackAnalytics(activityFilter)
-        .then(setAnalytics)
-        .catch((error) => setAdminError(error.message));
-    }
+    // Skip the unfiltered case: the dashboard request already returned it.
+    if (!session || !activityFilter) return;
+    setAdminError("");
+    getFeedbackAnalytics(activityFilter)
+      .then(setAnalytics)
+      .catch((error) => setAdminError(error.message));
   }, [activityFilter, session]);
   const filtered = rows.filter((r) =>
     [r.title, r.venue, r.inCharge]
@@ -162,15 +169,18 @@ export function AdminDashboard() {
   async function remove(id) {
     if (!confirm("Delete this activity?")) return;
     setAdminError("");
+    const previous = rows;
+    setRows((x) => x.filter((r) => r.id !== id));
     try {
       await deleteActivity(id);
-      setRows((x) => x.filter((r) => r.id !== id));
       setToast("Activity deleted");
     } catch (deleteError) {
+      setRows(previous); // put it back: the server rejected the delete
       setAdminError(deleteError.message || "Unable to delete the activity.");
     }
   }
   async function toggleActive(row) {
+    if (row.pending) return; // a toggle is already in flight for this row
     const next = !row.active;
     if (
       !next &&
@@ -180,13 +190,25 @@ export function AdminDashboard() {
     )
       return;
     setAdminError("");
+    // Optimistic: the row flips immediately and reverts if the call fails.
+    // A round trip here is 2-4s, which otherwise feels like a dead click.
+    const revert = () =>
+      setRows((x) =>
+        x.map((r) =>
+          r.id === row.id ? { ...r, active: row.active, pending: false } : r,
+        ),
+      );
+    setRows((x) =>
+      x.map((r) => (r.id === row.id ? { ...r, active: next, pending: true } : r)),
+    );
     try {
       await setActivityStatus(row.id, next);
       setRows((x) =>
-        x.map((r) => (r.id === row.id ? { ...r, active: next } : r)),
+        x.map((r) => (r.id === row.id ? { ...r, active: next, pending: false } : r)),
       );
       setToast(next ? "Activity reopened" : "Activity ended");
     } catch (statusError) {
+      revert();
       setAdminError(
         statusError.message || "Unable to change the activity status.",
       );
@@ -209,6 +231,14 @@ export function AdminDashboard() {
     analytics: [
       "Feedback analytics",
       "Understand participant scores and compare activities.",
+    ],
+    responses: [
+      "Participant responses",
+      "Browse every submitted response and filter by activity.",
+    ],
+    certificates: [
+      "Certificates",
+      "Track generation, see why one failed, and re-queue it.",
     ],
     users: ["Users", "Create and maintain administrator access."],
     questions: [
@@ -235,6 +265,20 @@ export function AdminDashboard() {
             title="View participant feedback analytics"
           >
             <Sparkles /> Analytics
+          </button>
+          <button
+            className={tab === "responses" ? "active" : ""}
+            onClick={() => setTab("responses")}
+            title="Browse participant responses, filtered by activity"
+          >
+            <ClipboardList /> Responses
+          </button>
+          <button
+            className={tab === "certificates" ? "active" : ""}
+            onClick={() => setTab("certificates")}
+            title="Review and retry certificate generation"
+          >
+            <FileCheck2 /> Certificates
           </button>
           {isSuperadmin && (
             <button
@@ -318,6 +362,10 @@ export function AdminDashboard() {
             activityFilter={activityFilter}
             onFilter={setActivityFilter}
           />
+        ) : tab === "responses" ? (
+          <ResponsesPanel activities={rows} />
+        ) : tab === "certificates" ? (
+          <CertificatesPanel activities={rows} />
         ) : tab === "users" && isSuperadmin ? (
           <UsersPanel />
         ) : tab === "questions" && isSuperadmin ? (
@@ -378,6 +426,22 @@ export function AdminDashboard() {
                     </tr>
                   </thead>
                   <tbody>
+                    {!analytics && !rows.length && (
+                      <tr>
+                        <td colSpan={7} className="skeleton-cell">
+                          <SkeletonTable rows={4} columns={6} />
+                        </td>
+                      </tr>
+                    )}
+                    {analytics && !filtered.length && (
+                      <tr>
+                        <td colSpan={7} className="empty-cell">
+                          {query
+                            ? "No activities match your search."
+                            : "No activities yet. Create one to start collecting feedback."}
+                        </td>
+                      </tr>
+                    )}
                     {filtered.map((r) => (
                       <tr key={r.id}>
                         <td>
@@ -411,44 +475,58 @@ export function AdminDashboard() {
                         </td>
                         <td>
                           <div className="row-actions">
-                            <button
-                              disabled={!r.canManage}
-                              title={
+                            <Tooltip
+                              wrap={!r.canManage}
+                              label={
                                 r.canManage
                                   ? r.active
-                                    ? `End ${r.title}`
-                                    : `Reopen ${r.title}`
+                                    ? "Stop collecting feedback and pause certificates"
+                                    : "Reopen and release held certificates"
                                   : NOT_OWNER_HINT
                               }
-                              onClick={() => toggleActive(r)}
                             >
-                              {r.active ? "End" : "Reopen"}
-                            </button>
-                            <button
-                              disabled={!r.canManage}
-                              title={
-                                r.canManage ? `Edit ${r.title}` : NOT_OWNER_HINT
+                              <button
+                                disabled={!r.canManage || r.pending}
+                                onClick={() => toggleActive(r)}
+                              >
+                                {r.active ? "End" : "Reopen"}
+                              </button>
+                            </Tooltip>
+                            <Tooltip
+                              wrap={!r.canManage}
+                              label={
+                                r.canManage
+                                  ? "Edit activity details"
+                                  : NOT_OWNER_HINT
                               }
-                              onClick={() => {
-                                setEditing(r);
-                                setModal(true);
-                              }}
                             >
-                              Edit
-                            </button>
+                              <button
+                                disabled={!r.canManage}
+                                onClick={() => {
+                                  setEditing(r);
+                                  setModal(true);
+                                }}
+                              >
+                                Edit
+                              </button>
+                            </Tooltip>
+                            <Tooltip
+                              wrap={!r.canManage}
+                              label={
+                                r.canManage
+                                  ? "Delete this activity permanently"
+                                  : NOT_OWNER_HINT
+                              }
+                            >
                             <button
                               className="danger"
                               disabled={!r.canManage}
                               aria-label={`Delete ${r.title}`}
-                              title={
-                                r.canManage
-                                  ? `Delete ${r.title}`
-                                  : NOT_OWNER_HINT
-                              }
                               onClick={() => remove(r.id)}
                             >
                               <Trash2 />
                             </button>
+                            </Tooltip>
                           </div>
                         </td>
                       </tr>
@@ -484,6 +562,411 @@ export function AdminDashboard() {
   );
 }
 
+function ResponsesPanel({ activities }) {
+  const [data, setData] = useState(null),
+    [activityId, setActivityId] = useState(""),
+    [query, setQuery] = useState(""),
+    [expanded, setExpanded] = useState(null),
+    [loading, setLoading] = useState(true),
+    [error, setError] = useState("");
+
+  const load = (force = false) => {
+    setLoading(true);
+    setError("");
+    return getAdminResponses({ activityId, query }, { force })
+      .then(setData)
+      .catch((loadError) => setError(loadError.message))
+      .finally(() => setLoading(false));
+  };
+  // Refetch on activity change; the text query is applied on submit so every
+  // keystroke does not become an Apps Script round trip.
+  useEffect(() => {
+    load();
+  }, [activityId]);
+
+  const entries = data?.entries || [];
+  return (
+    <section className="management-card">
+      <div className="management-heading">
+        <div>
+          <h2>Participant responses</h2>
+          {loading && !data ? (
+            <Skeleton width={130} height={11} style={{ marginTop: 6 }} />
+          ) : (
+            <p>
+              {`${entries.length} shown${data?.total > entries.length ? ` of ${data.total}` : ""}`}
+              {loading ? " · refreshing…" : ""}
+            </p>
+          )}
+        </div>
+        <div className="panel-tools">
+          <div className="select-wrap">
+            <select
+              value={activityId}
+              onChange={(e) => setActivityId(e.target.value)}
+              title="Filter responses by activity"
+            >
+              <option value="">All activities</option>
+              {activities.map((a) => (
+                <option key={a.id} value={a.activityId || a.id}>
+                  {a.title}
+                </option>
+              ))}
+            </select>
+            <ChevronDown />
+          </div>
+          <form
+            className="search"
+            onSubmit={(e) => {
+              e.preventDefault();
+              load();
+            }}
+          >
+            <Search />
+            <input
+              value={query}
+              onChange={(e) => setQuery(e.target.value)}
+              placeholder="Name, email, activity…"
+              aria-label="Search responses"
+            />
+          </form>
+          <button
+            className="mini-button"
+            onClick={() => load(true)}
+            disabled={loading}
+          >
+            <RefreshCw size={13} /> Refresh
+          </button>
+        </div>
+      </div>
+      {error && <div className="alert">{error}</div>}
+      <div className="table-scroll">
+        <table>
+          <thead>
+            <tr>
+              <th>Participant</th>
+              <th>Activity</th>
+              <th>Submitted</th>
+              <th>Avg</th>
+              <th>Certificate</th>
+              <th></th>
+            </tr>
+          </thead>
+          <tbody>
+            {loading && !data && (
+              <tr>
+                <td colSpan={6} className="skeleton-cell">
+                  <SkeletonTable rows={6} columns={5} />
+                </td>
+              </tr>
+            )}
+            {!loading && !entries.length && (
+              <tr>
+                <td colSpan={6} className="empty-cell">
+                  No responses match this filter.
+                </td>
+              </tr>
+            )}
+            {entries.map((entry) => (
+              <React.Fragment key={entry.row}>
+                <tr>
+                  <td>
+                    <strong>{entry.name || "—"}</strong>
+                    <small>{entry.email}</small>
+                  </td>
+                  <td>
+                    {entry.title || "—"}
+                    <small>{entry.activityDate}</small>
+                  </td>
+                  <td>{entry.submittedAt || "—"}</td>
+                  <td>{entry.averageRating ? entry.averageRating : "—"}</td>
+                  <td>
+                    <span
+                      className={`badge state-${entry.certificateState.toLowerCase()}`}
+                      title={entry.certificateError || entry.certificateState}
+                    >
+                      {entry.certificateState}
+                    </span>
+                  </td>
+                  <td>
+                    <div className="row-actions">
+                      <button
+                        className="mini-button"
+                        onClick={() =>
+                          setExpanded(expanded === entry.row ? null : entry.row)
+                        }
+                        title="Show this participant's answers"
+                      >
+                        {expanded === entry.row ? "Hide" : "Answers"}
+                      </button>
+                    </div>
+                  </td>
+                </tr>
+                {expanded === entry.row && (
+                  <tr className="detail-row">
+                    <td colSpan={6}>
+                      <div className="answer-grid">
+                        {entry.answers.map((answer) => (
+                          <div key={answer.number}>
+                            <span>Q{answer.number}</span>
+                            <strong>{answer.value || "—"}</strong>
+                          </div>
+                        ))}
+                      </div>
+                      {(entry.takeaways || entry.suggestions) && (
+                        <div className="answer-notes">
+                          {entry.takeaways && (
+                            <p>
+                              <b>Takeaway:</b> {entry.takeaways}
+                            </p>
+                          )}
+                          {entry.suggestions && (
+                            <p>
+                              <b>Suggestion:</b> {entry.suggestions}
+                            </p>
+                          )}
+                        </div>
+                      )}
+                    </td>
+                  </tr>
+                )}
+              </React.Fragment>
+            ))}
+          </tbody>
+        </table>
+      </div>
+    </section>
+  );
+}
+
+const CERTIFICATE_TABS = [
+  ["FAILED", "Failed", "Generation failed — retry after fixing the cause"],
+  ["QUEUED", "Awaiting release", "Waiting for the queue to pick them up"],
+  ["ISSUED", "Issued", "Generated and emailed to the participant"],
+];
+
+function CertificatesPanel({ activities }) {
+  const [state, setState] = useState("FAILED"),
+    [activityId, setActivityId] = useState(""),
+    [data, setData] = useState(null),
+    [selected, setSelected] = useState([]),
+    [loading, setLoading] = useState(true),
+    [busy, setBusy] = useState(false),
+    [message, setMessage] = useState(""),
+    [error, setError] = useState("");
+
+  const load = (force = false) => {
+    setLoading(true);
+    setError("");
+    setSelected([]);
+    return getCertificateQueue({ state, activityId }, { force })
+      .then(setData)
+      .catch((loadError) => setError(loadError.message))
+      .finally(() => setLoading(false));
+  };
+  useEffect(() => {
+    load();
+  }, [state, activityId]);
+
+  const entries = data?.entries || [];
+  const counts = data?.counts || {};
+  const toggle = (row) =>
+    setSelected((rows) =>
+      rows.includes(row) ? rows.filter((r) => r !== row) : [...rows, row],
+    );
+
+  async function retry(rows) {
+    if (!rows.length) return;
+    setBusy(true);
+    setMessage("");
+    setError("");
+    // Optimistic: pull the rows out of the Failed list immediately. They move
+    // to Awaiting release, which is where they genuinely are once re-queued.
+    const previous = data;
+    setData((current) =>
+      current
+        ? {
+            ...current,
+            entries: current.entries.filter((e) => !rows.includes(e.row)),
+            counts: {
+              ...current.counts,
+              FAILED: Math.max(0, (current.counts?.FAILED || 0) - rows.length),
+              QUEUED: (current.counts?.QUEUED || 0) + rows.length,
+            },
+          }
+        : current,
+    );
+    setSelected([]);
+    try {
+      const result = await retryCertificates(rows);
+      setMessage(
+        `${result.requeued} certificate${result.requeued === 1 ? "" : "s"} re-queued. The generator picks them up within a minute.`,
+      );
+      await load(true);
+    } catch (retryError) {
+      setData(previous); // the retry failed; put the rows back
+      setError(retryError.message || "Unable to retry these certificates.");
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  return (
+    <section className="management-card">
+      <div className="management-heading">
+        <div>
+          <h2>Certificate generation</h2>
+          <p>Review what failed, fix the cause, then re-queue it.</p>
+        </div>
+        <div className="panel-tools">
+          <div className="select-wrap">
+            <select
+              value={activityId}
+              onChange={(e) => setActivityId(e.target.value)}
+              title="Filter by activity"
+            >
+              <option value="">All activities</option>
+              {activities.map((a) => (
+                <option key={a.id} value={a.activityId || a.id}>
+                  {a.title}
+                </option>
+              ))}
+            </select>
+            <ChevronDown />
+          </div>
+          <button
+            className="mini-button"
+            onClick={() => load(true)}
+            disabled={loading}
+          >
+            <RefreshCw size={13} /> Refresh
+          </button>
+        </div>
+      </div>
+
+      <div className="queue-tabs">
+        {CERTIFICATE_TABS.map(([key, label, hint]) => (
+          <button
+            key={key}
+            className={state === key ? "active" : ""}
+            onClick={() => setState(key)}
+            title={hint}
+          >
+            {label}
+            <i>{counts[key] ?? 0}</i>
+          </button>
+        ))}
+      </div>
+
+      {error && <div className="alert">{error}</div>}
+      {message && <div className="notice">{message}</div>}
+      {!!data?.heldActivities?.length && (
+        <div className="notice">
+          Held because their activity is ended:{" "}
+          {data.heldActivities.join(", ")}. Reopen the activity to release them.
+        </div>
+      )}
+
+      {state === "FAILED" && entries.length > 0 && (
+        <div className="queue-bulk">
+          <button
+            className="button primary"
+            disabled={busy || !selected.length}
+            onClick={() => retry(selected)}
+            title="Re-queue the selected certificates"
+          >
+            <RefreshCw size={16} />
+            {busy
+              ? "Re-queueing…"
+              : `Retry selected${selected.length ? ` (${selected.length})` : ""}`}
+          </button>
+          <button
+            className="mini-button"
+            disabled={busy}
+            onClick={() => retry(entries.map((e) => e.row))}
+            title="Re-queue every failed certificate shown"
+          >
+            Retry all {entries.length}
+          </button>
+        </div>
+      )}
+
+      <div className="table-scroll">
+        <table>
+          <thead>
+            <tr>
+              {state === "FAILED" && <th className="tick-col"></th>}
+              <th>Participant</th>
+              <th>Activity</th>
+              <th>Submitted</th>
+              <th>{state === "FAILED" ? "Reason" : "Status"}</th>
+            </tr>
+          </thead>
+          <tbody>
+            {loading && !data && (
+              <tr>
+                <td
+                  colSpan={state === "FAILED" ? 5 : 4}
+                  className="skeleton-cell"
+                >
+                  <SkeletonTable rows={4} columns={4} />
+                </td>
+              </tr>
+            )}
+            {!loading && !entries.length && (
+              <tr>
+                <td
+                  colSpan={state === "FAILED" ? 5 : 4}
+                  className="empty-cell"
+                >
+                  No certificate requests with this status.
+                </td>
+              </tr>
+            )}
+            {entries.map((entry) => (
+              <tr key={entry.row}>
+                {state === "FAILED" && (
+                  <td className="tick-col">
+                    <input
+                      type="checkbox"
+                      checked={selected.includes(entry.row)}
+                      onChange={() => toggle(entry.row)}
+                      aria-label={`Select ${entry.name} for retry`}
+                    />
+                  </td>
+                )}
+                <td>
+                  <strong>{entry.name || "—"}</strong>
+                  <small>{entry.email}</small>
+                </td>
+                <td>
+                  {entry.title || "—"}
+                  <small>{entry.activityDate}</small>
+                </td>
+                <td>{entry.submittedAt || "—"}</td>
+                <td>
+                  {state === "FAILED" ? (
+                    <span className="queue-error" title={entry.error}>
+                      {entry.error || "Unknown error"}
+                    </span>
+                  ) : (
+                    <span
+                      className={`badge state-${entry.state.toLowerCase()}`}
+                      title={entry.held ? "Held: the activity is ended" : ""}
+                    >
+                      {entry.held ? "HELD" : entry.state}
+                    </span>
+                  )}
+                </td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </div>
+    </section>
+  );
+}
+
 function UsersPanel() {
   const blank = {
     user_id: "",
@@ -497,11 +980,15 @@ function UsersPanel() {
     [form, setForm] = useState(blank),
     [error, setError] = useState(""),
     [notice, setNotice] = useState(""),
-    [saving, setSaving] = useState(false);
-  const loadUsers = () =>
-    getAdminUsers()
+    [saving, setSaving] = useState(false),
+    [loading, setLoading] = useState(true);
+  const loadUsers = () => {
+    setLoading(true);
+    return getAdminUsers()
       .then(setUsers)
-      .catch((e) => setError(e.message));
+      .catch((e) => setError(e.message))
+      .finally(() => setLoading(false));
+  };
   useEffect(() => {
     loadUsers();
   }, []);
@@ -621,6 +1108,20 @@ function UsersPanel() {
               </tr>
             </thead>
             <tbody>
+              {loading && !users.length && (
+                <tr>
+                  <td colSpan={5} className="skeleton-cell">
+                    <SkeletonTable rows={3} columns={4} />
+                  </td>
+                </tr>
+              )}
+              {!loading && !users.length && (
+                <tr>
+                  <td colSpan={5} className="empty-cell">
+                    No administrator accounts yet.
+                  </td>
+                </tr>
+              )}
               {users.map((user) => (
                 <tr key={user.user_id || user.email}>
                   <td>
@@ -689,7 +1190,20 @@ function QuestionsPanel() {
   }
   if (loading)
     return (
-      <section className="analytics-loading">Loading survey questions…</section>
+      <section className="management-card" role="status" aria-label="Loading questions">
+        <Skeleton width={210} height={14} />
+        <div className="question-editor" style={{ marginTop: 20 }}>
+          {Array.from({ length: 6 }, (_, i) => (
+            <div key={i} className="question-row">
+              <Skeleton width={30} height={30} radius={9} />
+              <div style={{ display: "grid", gap: 10 }}>
+                <Skeleton width="100%" height={54} radius={10} />
+                <Skeleton width="42%" height={30} radius={10} />
+              </div>
+            </div>
+          ))}
+        </div>
+      </section>
     );
   return (
     <form className="management-card questions-form" onSubmit={save}>
@@ -876,7 +1390,7 @@ function AuditPanel() {
               disabled={loading}
               title="Refresh audit records"
             >
-              {loading ? "Loading…" : "Refresh"}
+              {loading ? "Loading…" : (<><RefreshCw size={13} /> Refresh</>)}
             </button>
           </div>
         </div>
@@ -901,6 +1415,20 @@ function AuditPanel() {
               </tr>
             </thead>
             <tbody>
+              {loading && !data && (
+                <tr>
+                  <td colSpan={7} className="skeleton-cell">
+                    <SkeletonTable rows={6} columns={6} />
+                  </td>
+                </tr>
+              )}
+              {!loading && !entries.length && (
+                <tr>
+                  <td colSpan={7} className="empty-cell">
+                    No audit entries match these filters.
+                  </td>
+                </tr>
+              )}
               {entries.map((entry) => (
                 <tr key={entry.audit_id}>
                   <td>{entry.timestamp}</td>
@@ -943,10 +1471,31 @@ function AuditPanel() {
 }
 
 function AnalyticsPanel({ data, activities, activityFilter, onFilter }) {
+  // Placeholders shaped like the real tiles and bars, so the panel does not
+  // reflow when the numbers land.
   if (!data)
     return (
-      <section className="analytics-loading">
-        Loading participant scores…
+      <section className="analytics-skeleton" role="status" aria-label="Loading analytics">
+        <div className="stats">
+          {[0, 1, 2].map((i) => (
+            <article key={i}>
+              <Skeleton width="46%" height={10} />
+              <Skeleton width="34%" height={24} style={{ marginTop: 12 }} />
+            </article>
+          ))}
+        </div>
+        <div className="management-card">
+          <Skeleton width={180} height={13} />
+          <div style={{ marginTop: 18, display: "grid", gap: 12 }}>
+            {Array.from({ length: 8 }, (_, i) => (
+              <div key={i} style={{ display: "grid", gridTemplateColumns: "34px 1fr 44px", gap: 12, alignItems: "center" }}>
+                <Skeleton width="100%" height={10} />
+                <Skeleton width={`${88 - i * 6}%`} height={10} />
+                <Skeleton width="100%" height={10} />
+              </div>
+            ))}
+          </div>
+        </div>
       </section>
     );
   const max = Math.max(1, ...data.distribution),

@@ -18,7 +18,7 @@
 .verification-page {
   min-height: 100vh;
   background:
-    radial-gradient(circle at 15% 15%, #e3f1e7, transparent 28%), var(--cream);
+    radial-gradient(circle at 15% 15%, #e3e7f1, transparent 28%), var(--cream);
 }
 .verification-shell {
   max-width: 980px;
@@ -35,7 +35,7 @@
 .verification-intro h1 {
   font: 800 clamp(36px, 5vw, 58px)/1.04 Manrope;
   margin: 0;
-  color: #143f34;
+  color: #001f5c;
   letter-spacing: -0.05em;
 }
 .verification-intro > p:last-child {
@@ -83,12 +83,12 @@
   margin: 5px 0 16px;
 }
 .verification-result.valid {
-  background: #edf7ef;
-  border: 1px solid #cfe7d5;
-  color: #245f49;
+  background: #edf0f7;
+  border: 1px solid #cfd7e7;
+  color: #123a86;
 }
 .verification-result.valid > svg {
-  background: #2f7659;
+  background: #2f4576;
   color: #fff;
 }
 .verification-result.invalid {

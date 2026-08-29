@@ -76,3 +76,68 @@ export function Brand({ compact = false, admin = false }) {
     </div>
   );
 }
+
+/**
+ * Skeleton placeholder. Sized to the content it stands in for, so the layout
+ * does not jump when real data arrives — a spinner cannot do that.
+ */
+export function Skeleton({ width = "100%", height = 12, radius = 6, style }) {
+  return (
+    <span
+      className="skeleton"
+      aria-hidden="true"
+      style={{ width, height, borderRadius: radius, ...style }}
+    />
+  );
+}
+
+/** Table-shaped skeleton matching a real row's two-line cell layout. */
+export function SkeletonTable({ rows = 5, columns = 5 }) {
+  return (
+    <div className="skeleton-table" role="status" aria-label="Loading">
+      {Array.from({ length: rows }, (_, r) => (
+        <div
+          key={r}
+          className="skeleton-row"
+          // Track count follows the prop; a fixed grid in CSS would leave an
+          // empty column whenever a table has fewer than five.
+          style={{
+            gridTemplateColumns: `1.6fr ${"1fr ".repeat(Math.max(0, columns - 1)).trim()}`,
+          }}
+        >
+          {Array.from({ length: columns }, (_, c) => (
+            <div key={c}>
+              <Skeleton width={c === 0 ? "72%" : "56%"} height={11} />
+              {c === 0 && (
+                <Skeleton
+                  width="48%"
+                  height={9}
+                  style={{ marginTop: 6, opacity: 0.7 }}
+                />
+              )}
+            </div>
+          ))}
+        </div>
+      ))}
+    </div>
+  );
+}
+
+/**
+ * Tooltip on hover and keyboard focus.
+ *
+ * The native `title` attribute is invisible to touch, appears only after a
+ * long delay, and cannot be styled. This keeps `title` off the element so the
+ * browser does not render both.
+ */
+export function Tooltip({ label, children, placement = "top", wrap = false }) {
+  if (!label) return children;
+  return (
+    <span
+      className={`tip tip-${placement}${wrap ? " tip-wrap" : ""}`}
+      data-tip={label}
+    >
+      {children}
+    </span>
+  );
+}
