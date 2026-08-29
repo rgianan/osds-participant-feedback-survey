@@ -250,7 +250,7 @@ export function PublicForm() {
       <main className="survey-shell">
         <section className="survey-intro">
           <p className="eyebrow">
-            <Sparkles size={15} /> Learning experience
+            <Sparkles size={15} /> Help us serve you better!
           </p>
           <h1>
             Help us make every

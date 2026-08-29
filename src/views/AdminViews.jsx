@@ -1273,7 +1273,7 @@ function AuditPanel() {
       action: "",
       outcome: "",
       query: "",
-      limit: 200,
+      limit: 50,
     }),
     [loading, setLoading] = useState(true),
     [error, setError] = useState("");
@@ -1331,7 +1331,9 @@ function AuditPanel() {
           <div>
             <h2>Administrator audit trail</h2>
             <p>
-              {data?.total || 0} matching records · chain integrity{" "}
+              {entries.length}
+              {data?.total > entries.length ? ` of ${data.total}` : ""} matching
+              records · chain integrity{" "}
               <b
                 className={
                   data?.integrity?.valid ? "integrity-good" : "integrity-bad"
@@ -1351,7 +1353,9 @@ function AuditPanel() {
               <option value="LOGIN">Login</option>
               <option value="LOGOUT">Logout</option>
               <option value="ACTIVITY_SAVE">Activity save</option>
+              <option value="ACTIVITY_STATUS">Activity end / reopen</option>
               <option value="ACTIVITY_DELETE">Activity delete</option>
+              <option value="CERTIFICATE_RETRY">Certificate retry</option>
               <option value="SIGNATURE_UPLOAD">Signature upload</option>
               <option value="USER_SAVE">User save</option>
               <option value="QUESTIONS_SAVE">Questions save</option>
@@ -1364,6 +1368,18 @@ function AuditPanel() {
               <option value="">All outcomes</option>
               <option value="SUCCESS">Success</option>
               <option value="FAILURE">Failure</option>
+            </select>
+            <select
+              className="audit-page-size"
+              value={String(filters.limit)}
+              onChange={(event) => updateFilter("limit", event.target.value)}
+              title="How many entries to show"
+              aria-label="Entries per page"
+            >
+              <option value="25">Show 25</option>
+              <option value="50">Show 50</option>
+              <option value="100">Show 100</option>
+              <option value="all">Show all</option>
             </select>
             <form
               onSubmit={(event) => {

@@ -498,7 +498,7 @@ function auditTargetForRequest_(action, body) {
   return {type:'system',id:''};
 }
 
-function auditActionLabel_(action) { return {adminLogin:'LOGIN',adminLogout:'LOGOUT',adminSaveActivity:'ACTIVITY_SAVE',adminDeleteActivity:'ACTIVITY_DELETE',adminUploadSignature:'SIGNATURE_UPLOAD',adminSaveUser:'USER_SAVE',adminSaveQuestions:'QUESTIONS_SAVE'}[action]||safeTrim_(action).toUpperCase(); }
+function auditActionLabel_(action) { return {adminLogin:'LOGIN',adminLogout:'LOGOUT',adminSaveActivity:'ACTIVITY_SAVE',adminSetActivityStatus:'ACTIVITY_STATUS',adminDeleteActivity:'ACTIVITY_DELETE',adminRetryCertificates:'CERTIFICATE_RETRY',adminUploadSignature:'SIGNATURE_UPLOAD',adminSaveUser:'USER_SAVE',adminSaveQuestions:'QUESTIONS_SAVE'}[action]||safeTrim_(action).toUpperCase(); }
 
 function ensureAuditSheet_() {
   var ss=SpreadsheetApp.getActiveSpreadsheet(),sh=ss.getSheetByName('Audit');
@@ -574,7 +574,10 @@ function adminGetAuditLog(filters, adminToken) {
   entries.forEach(function(entry){if(!secret||!constantTimeEquals_(hmac256Base64_(auditCanonical_(entry),secret),entry.entry_hash)||(previousShown!==null&&entry.previous_hash!==previousShown))integrity=false;previousShown=entry.entry_hash;});if(expectedHead&&previousShown!==expectedHead)integrity=false;
   var action=safeTrim_(filters.action).toUpperCase(),outcome=safeTrim_(filters.outcome).toUpperCase(),query=safeTrim_(filters.query).toLowerCase();
   var filtered=entries.filter(function(entry){return(!action||entry.action===action)&&(!outcome||entry.outcome===outcome)&&(!query||[entry.actor_email,entry.target_id,entry.action,entry.details,entry.request_id].join(' ').toLowerCase().indexOf(query)>=0);});
-  var limit=Math.min(500,Math.max(25,Number(filters.limit)||200));
+  // 'all' returns everything, still ceilinged so a long log cannot exceed the
+  // Apps Script response size limit. `total` tells the client if it was cut.
+  var requestedLimit=safeTrim_(filters.limit).toLowerCase();
+  var limit=requestedLimit==='all'?2000:Math.min(500,Math.max(25,Number(filters.limit)||200));
   return {entries:filtered.slice(-limit).reverse().map(function(entry){delete entry.previous_hash;delete entry.entry_hash;try{entry.details=JSON.parse(entry.details||'{}');}catch(_){entry.details={};}return entry;}),integrity:{valid:integrity,checkedRows:entries.length},total:filtered.length};
 }
 
