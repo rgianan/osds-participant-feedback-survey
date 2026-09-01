@@ -128,6 +128,9 @@ export function AdminDashboard() {
     [analytics, setAnalytics] = useState(null),
     [activityFilter, setActivityFilter] = useState(""),
     [session, setSession] = useState(readAdminSession),
+    // Explicit, rather than inferring "still loading" from empty data: a failed
+    // load leaves the data empty too, which would animate skeletons forever.
+    [loaded, setLoaded] = useState(false),
     [adminError, setAdminError] = useState("");
   const load = (force = false) => {
     setAdminError("");
@@ -147,7 +150,8 @@ export function AdminDashboard() {
         ) {
           adminLogout().finally(() => setSession(null));
         }
-      });
+      })
+      .finally(() => setLoaded(true));
   };
   useEffect(() => {
     if (session) load();
@@ -357,6 +361,7 @@ export function AdminDashboard() {
         {adminError && <div className="alert admin-alert">{adminError}</div>}
         {tab === "analytics" ? (
           <AnalyticsPanel
+            loaded={loaded}
             data={analytics}
             activities={rows}
             activityFilter={activityFilter}
@@ -426,14 +431,14 @@ export function AdminDashboard() {
                     </tr>
                   </thead>
                   <tbody>
-                    {!analytics && !rows.length && (
+                    {!loaded && !rows.length && (
                       <tr>
                         <td colSpan={7} className="skeleton-cell">
                           <SkeletonTable rows={4} columns={6} />
                         </td>
                       </tr>
                     )}
-                    {analytics && !filtered.length && (
+                    {loaded && !filtered.length && (
                       <tr>
                         <td colSpan={7} className="empty-cell">
                           {query
@@ -1486,7 +1491,15 @@ function AuditPanel() {
   );
 }
 
-function AnalyticsPanel({ data, activities, activityFilter, onFilter }) {
+function AnalyticsPanel({ data, loaded, activities, activityFilter, onFilter }) {
+  // A load that failed is not a load in progress: show nothing rather than an
+  // endless shimmer, and let the dashboard's error banner speak.
+  if (!data && loaded)
+    return (
+      <section className="analytics-loading">
+        Analytics could not be loaded.
+      </section>
+    );
   // Placeholders shaped like the real tiles and bars, so the panel does not
   // reflow when the numbers land.
   if (!data)

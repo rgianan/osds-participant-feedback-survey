@@ -1698,7 +1698,13 @@ function adminSaveActivity(payload, adminToken) {
   var hdr = getHeaderMap_(sh);
   requiredHeaders.forEach(function(header){ if(idxOf_(hdr,[header])<0){sh.getRange(1,sh.getLastColumn()+1).setValue(header);hdr=getHeaderMap_(sh);} });
   var lastCol=sh.getLastColumn(), rowValues=new Array(lastCol).fill('');
-  if (isFinite(rowId) && rowId >= 2 && rowId <= sh.getLastRow()) {
+  // One predicate decides both the ownership check and the write. These used to
+  // be two expressions that disagreed: the check required rowId <= lastRow but
+  // the write only required rowId >= 2, so a row id past the end of the sheet
+  // skipped the check and still took the update branch.
+  var isUpdate = isFinite(rowId) && rowId >= 2;
+  if (isUpdate && rowId > sh.getLastRow()) throw new Error('Activity does not exist.');
+  if (isUpdate) {
     // Editing an existing activity is restricted the same way as ending it.
     assertCanManageActivity_(sh, rowId, session, 'edit');
     rowValues=sh.getRange(rowId,1,1,lastCol).getValues()[0];
@@ -1713,7 +1719,6 @@ function adminSaveActivity(payload, adminToken) {
   // it is what adminSetActivityStatus checks. Rows predating this column are
   // blank, so the first administrator to edit one adopts it — harmless, because
   // any administrator can already delete any activity.
-  var isUpdate = isFinite(rowId) && rowId >= 2 && rowId <= sh.getLastRow();
   var cCreatedBy = idxOf_(hdr, ['created by','createdby','owner','creator']);
   if (!isUpdate || (cCreatedBy >= 0 && !safeTrim_(rowValues[cCreatedBy]))) {
     put(['created by','createdby','owner','creator'], safeTrim_(session.email).toLowerCase());
@@ -1723,7 +1728,7 @@ function adminSaveActivity(payload, adminToken) {
     put(['active','enabled','status'], 'TRUE');
   }
 
-  if (isFinite(rowId) && rowId >= 2) {
+  if (isUpdate) {
     // UPDATE existing row
     sh.getRange(rowId, 1, 1, rowValues.length).setValues([rowValues]);
   } else {
