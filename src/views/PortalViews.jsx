@@ -32,6 +32,9 @@ const emptyForm = {
   expectations: "",
   takeaways: "",
   suggestions: "",
+  // The honeypot. Missing from this object, its input started uncontrolled
+  // (value undefined) and React warned when a bot, or autofill, typed into it.
+  website: "",
 };
 
 
@@ -173,7 +176,7 @@ export function PublicForm() {
       }
       if (res.status === "DUP")
         throw new Error(
-          "A response for this activity already exists for this participant.",
+          "This email address has already submitted feedback for this activity.",
         );
       setDone(res);
     } catch (e) {
@@ -194,7 +197,7 @@ export function PublicForm() {
           <p className="eyebrow">Feedback received</p>
           <h1>Your certificate is in the queue.</h1>
           <p>
-            Thank you, {form.name.split(" ")[0]}. We’ll generate your
+            Thank you, {form.name.trim().split(/\s+/)[0]}. We’ll generate your
             certificate for <strong>{activity?.title}</strong> and email the
             link to <strong>{form.email}</strong>.
           </p>
@@ -467,6 +470,7 @@ export function PublicForm() {
                     <label>
                       What was your most valuable takeaway?
                       <textarea
+                        maxLength={2000}
                         value={form.takeaways}
                         onChange={(e) => update("takeaways", e.target.value)}
                         placeholder="Share your key learning..."
@@ -475,6 +479,7 @@ export function PublicForm() {
                     <label>
                       How can we improve future activities?
                       <textarea
+                        maxLength={2000}
                         value={form.suggestions}
                         onChange={(e) => update("suggestions", e.target.value)}
                         placeholder="Your suggestions are welcome..."

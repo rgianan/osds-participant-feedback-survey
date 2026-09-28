@@ -156,13 +156,22 @@ export function AdminDashboard() {
   useEffect(() => {
     if (session) load();
   }, [session]);
+  const filterRequest = useRef(0);
+  const filterChanged = useRef(false);
   useEffect(() => {
-    // Skip the unfiltered case: the dashboard request already returned it.
-    if (!session || !activityFilter) return;
+    // The dashboard request already returned the unfiltered numbers, so skip
+    // only the very first run. Skipping every "All activities" run left the
+    // last activity's figures on screen under the "All activities" label.
+    if (!session) return;
+    if (!activityFilter && !filterChanged.current) return;
+    filterChanged.current = true;
+    const request = ++filterRequest.current;
     setAdminError("");
     getFeedbackAnalytics(activityFilter)
-      .then(setAnalytics)
-      .catch((error) => setAdminError(error.message));
+      // Switching quickly between activities must not let a slower, older
+      // reply overwrite the one the admin picked last.
+      .then((scores) => request === filterRequest.current && setAnalytics(scores))
+      .catch((error) => request === filterRequest.current && setAdminError(error.message));
   }, [activityFilter, session]);
   const filtered = rows.filter((r) =>
     [r.title, r.venue, r.inCharge]
@@ -170,14 +179,18 @@ export function AdminDashboard() {
       .toLowerCase()
       .includes(query.toLowerCase()),
   );
-  async function remove(id) {
-    if (!confirm("Delete this activity?")) return;
+  async function remove(row) {
+    if (!confirm(`Delete "${row.title}"?`)) return;
     setAdminError("");
     const previous = rows;
-    setRows((x) => x.filter((r) => r.id !== id));
+    setRows((x) => x.filter((r) => r.id !== row.id));
     try {
-      await deleteActivity(id);
+      await deleteActivity(row.id, row.activityId);
       setToast("Activity deleted");
+      // Row ids are sheet row numbers. Every activity below the deleted one
+      // just moved up a row, so the ids still on screen are off by one: End,
+      // Edit or Delete on them would hit the neighbouring activity.
+      load(true);
     } catch (deleteError) {
       setRows(previous); // put it back: the server rejected the delete
       setAdminError(deleteError.message || "Unable to delete the activity.");
@@ -206,7 +219,7 @@ export function AdminDashboard() {
       x.map((r) => (r.id === row.id ? { ...r, active: next, pending: true } : r)),
     );
     try {
-      await setActivityStatus(row.id, next);
+      await setActivityStatus(row.id, next, row.activityId);
       setRows((x) =>
         x.map((r) => (r.id === row.id ? { ...r, active: next, pending: false } : r)),
       );
@@ -382,7 +395,7 @@ export function AdminDashboard() {
             <section className="stats">
               <article>
                 <span>Active activities</span>
-                <strong>{rows.length}</strong>
+                <strong>{rows.filter((r) => r.active).length}</strong>
                 <i className="green">
                   <FileCheck2 />
                 </i>
@@ -527,7 +540,7 @@ export function AdminDashboard() {
                               className="danger"
                               disabled={!r.canManage}
                               aria-label={`Delete ${r.title}`}
-                              onClick={() => remove(r.id)}
+                              onClick={() => remove(r)}
                             >
                               <Trash2 />
                             </button>
@@ -575,13 +588,16 @@ function ResponsesPanel({ activities }) {
     [loading, setLoading] = useState(true),
     [error, setError] = useState("");
 
+  const latest = useRef(0);
   const load = (force = false) => {
+    const request = ++latest.current;
+    const current = () => request === latest.current;
     setLoading(true);
     setError("");
     return getAdminResponses({ activityId, query }, { force })
-      .then(setData)
-      .catch((loadError) => setError(loadError.message))
-      .finally(() => setLoading(false));
+      .then((result) => current() && setData(result))
+      .catch((loadError) => current() && setError(loadError.message))
+      .finally(() => current() && setLoading(false));
   };
   // Refetch on activity change; the text query is applied on submit so every
   // keystroke does not become an Apps Script round trip.
@@ -746,9 +762,16 @@ function ResponsesPanel({ activities }) {
 
 const CERTIFICATE_TABS = [
   ["FAILED", "Failed", "Generation failed — retry after fixing the cause"],
+  [
+    "PROCESSING",
+    "Stuck",
+    "Started but never finished. Retry is refused while the generator is running, so it cannot double-issue.",
+  ],
   ["QUEUED", "Awaiting release", "Waiting for the queue to pick them up"],
   ["ISSUED", "Issued", "Generated and emailed to the participant"],
 ];
+// Tabs whose rows can be re-queued: failures, and runs that were cut off.
+const RETRYABLE_STATES = ["FAILED", "PROCESSING"];
 
 function CertificatesPanel({ activities }) {
   const [state, setState] = useState("FAILED"),
@@ -760,14 +783,17 @@ function CertificatesPanel({ activities }) {
     [message, setMessage] = useState(""),
     [error, setError] = useState("");
 
+  const latest = useRef(0);
   const load = (force = false) => {
+    const request = ++latest.current;
+    const current = () => request === latest.current;
     setLoading(true);
     setError("");
     setSelected([]);
     return getCertificateQueue({ state, activityId }, { force })
-      .then(setData)
-      .catch((loadError) => setError(loadError.message))
-      .finally(() => setLoading(false));
+      .then((result) => current() && setData(result))
+      .catch((loadError) => current() && setError(loadError.message))
+      .finally(() => current() && setLoading(false));
   };
   useEffect(() => {
     load();
@@ -795,7 +821,9 @@ function CertificatesPanel({ activities }) {
             entries: current.entries.filter((e) => !rows.includes(e.row)),
             counts: {
               ...current.counts,
-              FAILED: Math.max(0, (current.counts?.FAILED || 0) - rows.length),
+              // Decrement the tab the rows came from, not always FAILED:
+              // stuck rows are retried from the PROCESSING tab too.
+              [state]: Math.max(0, (current.counts?.[state] || 0) - rows.length),
               QUEUED: (current.counts?.QUEUED || 0) + rows.length,
             },
           }
@@ -809,8 +837,10 @@ function CertificatesPanel({ activities }) {
       );
       await load(true);
     } catch (retryError) {
-      setData(previous); // the retry failed; put the rows back
+      setData(previous); // put the rows back, then show the true state:
       setError(retryError.message || "Unable to retry these certificates.");
+      // retries go out in batches of 100, so earlier batches may have landed.
+      load(true);
     } finally {
       setBusy(false);
     }
@@ -872,7 +902,7 @@ function CertificatesPanel({ activities }) {
         </div>
       )}
 
-      {state === "FAILED" && entries.length > 0 && (
+      {RETRYABLE_STATES.includes(state) && entries.length > 0 && (
         <div className="queue-bulk">
           <button
             className="button primary"
@@ -889,7 +919,7 @@ function CertificatesPanel({ activities }) {
             className="mini-button"
             disabled={busy}
             onClick={() => retry(entries.map((e) => e.row))}
-            title="Re-queue every failed certificate shown"
+            title="Re-queue every certificate listed in this tab"
           >
             Retry all {entries.length}
           </button>
@@ -900,18 +930,18 @@ function CertificatesPanel({ activities }) {
         <table>
           <thead>
             <tr>
-              {state === "FAILED" && <th className="tick-col"></th>}
+              {RETRYABLE_STATES.includes(state) && <th className="tick-col"></th>}
               <th>Participant</th>
               <th>Activity</th>
               <th>Submitted</th>
-              <th>{state === "FAILED" ? "Reason" : "Status"}</th>
+              <th>{RETRYABLE_STATES.includes(state) ? "Reason" : "Status"}</th>
             </tr>
           </thead>
           <tbody>
             {loading && !data && (
               <tr>
                 <td
-                  colSpan={state === "FAILED" ? 5 : 4}
+                  colSpan={RETRYABLE_STATES.includes(state) ? 5 : 4}
                   className="skeleton-cell"
                 >
                   <SkeletonTable rows={4} columns={4} />
@@ -921,7 +951,7 @@ function CertificatesPanel({ activities }) {
             {!loading && !entries.length && (
               <tr>
                 <td
-                  colSpan={state === "FAILED" ? 5 : 4}
+                  colSpan={RETRYABLE_STATES.includes(state) ? 5 : 4}
                   className="empty-cell"
                 >
                   No certificate requests with this status.
@@ -930,7 +960,7 @@ function CertificatesPanel({ activities }) {
             )}
             {entries.map((entry) => (
               <tr key={entry.row}>
-                {state === "FAILED" && (
+                {RETRYABLE_STATES.includes(state) && (
                   <td className="tick-col">
                     <input
                       type="checkbox"
@@ -950,9 +980,12 @@ function CertificatesPanel({ activities }) {
                 </td>
                 <td>{entry.submittedAt || "—"}</td>
                 <td>
-                  {state === "FAILED" ? (
+                  {RETRYABLE_STATES.includes(state) ? (
                     <span className="queue-error" title={entry.error}>
-                      {entry.error || "Unknown error"}
+                      {entry.error ||
+                        (entry.state === "PROCESSING"
+                          ? "Interrupted before it finished — no error was recorded."
+                          : "Unknown error")}
                     </span>
                   ) : (
                     <span
@@ -1217,7 +1250,7 @@ function QuestionsPanel() {
           <h2>Participant survey questions</h2>
           <p>
             Changes apply to new survey responses. Choose an answer type per
-            question: a 1–5 multiple option, or a long text reply.
+            question: a 1–5 multiple option, yes or no, or a long text reply.
           </p>
         </div>
         <button
@@ -1784,6 +1817,10 @@ function ActivityModal({ activity, activities, onClose, onSaved }) {
     ]
       .filter(([key]) => !String(form[key] ?? "").trim())
       .map(([, label]) => label);
+    if (form.toDate && form.fromDate && form.toDate < form.fromDate) {
+      setError("The end date is before the start date.");
+      return;
+    }
     if (missing.length) {
       setError(
         `Still needed: ${missing.join(", ")}.${
@@ -1869,6 +1906,7 @@ function ActivityModal({ activity, activities, onClose, onSaved }) {
             <input
               required
               type="date"
+              min={form.fromDate || undefined}
               value={form.toDate}
               onChange={(e) => set("toDate", e.target.value)}
             />

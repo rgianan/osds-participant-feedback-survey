@@ -17,38 +17,28 @@ var CERTIFICATE_BATCH_SIZE = 10;
 var CERTIFICATE_RUN_BUDGET_MS = 270000;
 
 // --------------------------- Web app entry ---------------------------
+/**
+ * Health check only — deliberately JSON, never HtmlService.
+ *
+ * Any HtmlService page gives its visitor `google.script.run`, which can call
+ * EVERY function in this project whose name does not end in "_", executing as
+ * the deploying account with its Drive, Sheets and Mail access — and with no
+ * shared token, no Turnstile, and no admin session, because it never goes
+ * through doPost. With this web app open to "Anyone", that let an anonymous
+ * visitor call seedUser() to mint themselves a superadmin, resetTestingData()
+ * to wipe responses, or setupParticipantFeedbackSecurity() to rotate (and be
+ * handed) the shared token.
+ *
+ * The portal lives on Netlify and only ever talks to doPost, so nothing needs
+ * an HTML page here. Keep it that way: if a page is ever reintroduced, every
+ * editor-only function below still refuses to run outside the editor.
+ */
 function doGet(e) {
-  var p = (e && e.parameter) || {};
-  var requested = (p.page ? String(p.page).toLowerCase() : (p.admin ? 'admin' : 'index'));
-
-  var file = (requested === 'submit') ? 'submit'
-           : (requested === 'admin')  ? 'admin'
-           : 'index';
-
-  // STRICT GATE: never send admin.html unless whitelisted
-  if (file === 'admin') {
-    var email = getViewerEmail_();            // blank for “Anyone with Google account” deployments
-    var allowed = !!email && isWhitelisted_(email);
-    if (!allowed) {
-      var html = HtmlService.createHtmlOutput(
-        '<!doctype html><meta charset="utf-8">' +
-        '<style>body{font-family:system-ui,Segoe UI,Roboto,Arial,sans-serif;background:#f7f9fb;margin:0;padding:40px;color:#24323f}' +
-        '.card{max-width:720px;margin:40px auto;background:#fff;border:1px solid #edf0f2;border-radius:14px;box-shadow:0 6px 14px rgba(10,30,60,.06);padding:22px}' +
-        'h1{margin:0 0 8px;font-size:1.35rem;color:#1b305e} .muted{color:#6b7c93} a.btn{display:inline-block;margin-top:14px;padding:12px 16px;border-radius:12px;' +
-        'background:#eaeef7;color:#1b305e;text-decoration:none;border:1px solid #cfd4e0;font-weight:700}</style>' +
-        '<div class="card"><h1>Forbidden</h1>' +
-        '<p class="muted">You are not authorized to view this page.</p>' +
-        '<div id="backWrap"><a class="btn" href="#" id="backBtn">← Back to survey</a></div>' +
-        '<script>google.script.run.withSuccessHandler(function(base){' +
-        'var a=document.getElementById("backBtn"); if(a) a.href=base;}).getWebAppUrl();<\/script></div>'
-      );
-      return html.setTitle('Forbidden').setXFrameOptionsMode(HtmlService.XFrameOptionsMode.DEFAULT);
-    }
-  }
-
-  return HtmlService.createHtmlOutput('<meta name="viewport" content="width=device-width,initial-scale=1"><style>body{font-family:Arial,sans-serif;background:#f2f4f7;color:#16213d;display:grid;place-items:center;min-height:90vh}.card{text-align:center;background:white;border:1px solid #dfe2e7;border-radius:18px;padding:32px;max-width:480px}img{width:110px}p{color:#6d737f}</style><div class="card"><img src="https://ik.imagekit.io/k2qmtccm6/CHED_Logo_New.png" alt="CHED"><h1>Participant Feedback API</h1><p>The certificate service is online. Use the Netlify portal to access the application.</p></div>')
-    .setTitle('CHED Participant Feedback API')
-    .setFaviconUrl('https://ik.imagekit.io/k2qmtccm6/CHED-cropped-logo100x100.png');
+  return ContentService.createTextOutput(JSON.stringify({
+    ok: true,
+    service: 'CHED Participant Feedback API',
+    message: 'The certificate service is online. Use the Netlify portal to access the application.'
+  })).setMimeType(ContentService.MimeType.JSON);
 }
 
 /** JSON endpoint used by the Netlify frontend. */
@@ -77,7 +67,7 @@ function doPost(e) {
     else if (action === 'adminGetActivities') data = adminGetActivities(body.adminToken);
     else if (action === 'adminSaveActivity') data = adminSaveActivity(body.payload || {}, body.adminToken);
     else if (action === 'adminSetActivityStatus') data = adminSetActivityStatus(body.payload || {}, body.adminToken);
-    else if (action === 'adminDeleteActivity') data = adminDeleteActivity(body.id || (body.payload && body.payload.id), body.adminToken);
+    else if (action === 'adminDeleteActivity') data = adminDeleteActivity(body.id || (body.payload && body.payload.id), body.adminToken, body.activityId || (body.payload && body.payload.activityId));
     else if (action === 'adminUploadSignature') data = adminUploadSignature(body.payload || {}, body.adminToken);
     else if (action === 'adminGetFeedbackAnalytics') data = adminGetFeedbackAnalytics(body.activityId, body.adminToken);
     else if (action === 'adminGetUsers') data = adminGetUsers(body.adminToken);
@@ -222,12 +212,31 @@ function makeActivityId_(){
 }
 
 /**
+ * Refuse to run anywhere but the Apps Script editor (or by the owner).
+ *
+ * Setup, secret-rotation, user-seeding and data-wipe utilities are meant to be
+ * run by hand. From the editor, the active user and the effective user are the
+ * same person. Through the web app ("Execute as me"), the effective user is the
+ * owner but the active user is blank for anonymous visitors, or a different
+ * account for anyone else — so the check fails closed for exactly the callers
+ * that must never reach these functions.
+ */
+function assertEditorContext_(name) {
+  var active = '', effective = '';
+  try { active = safeTrim_(Session.getActiveUser().getEmail()).toLowerCase(); } catch (ignored) {}
+  try { effective = safeTrim_(Session.getEffectiveUser().getEmail()).toLowerCase(); } catch (ignored) {}
+  if (!active || active !== effective)
+    throw new Error((name || 'This function') + ' can only be run from the Apps Script editor.');
+}
+
+/**
  * Run once and copy the returned submitSharedToken into Netlify as
  * SUBMIT_SHARED_TOKEN. Apps Script stores only its SHA-256 hash. The separate
  * session secret never leaves Script Properties and keys all session hashes.
  * Running this again rotates both secrets and signs out every administrator.
  */
 function setupParticipantFeedbackSecurity() {
+  assertEditorContext_('setupParticipantFeedbackSecurity');
   var sharedToken = randomSecret_(), sessionSecret = randomSecret_(), properties = PropertiesService.getScriptProperties();
   var existing = properties.getProperties();
   Object.keys(existing).forEach(function(key){if(key.indexOf('ADMIN_SESSION_')===0)properties.deleteProperty(key);});
@@ -258,6 +267,7 @@ function setupParticipantFeedbackSecurity() {
  * exactly this mistake.
  */
 function rotateSubmitSharedTokenAndLog() {
+  assertEditorContext_('rotateSubmitSharedTokenAndLog');
   Logger.log(JSON.stringify(setupParticipantFeedbackSecurity(), null, 2));
 }
 
@@ -272,6 +282,7 @@ function rotateSubmitSharedTokenAndLog() {
  * naming the folder instead.
  */
 function checkDriveAccess() {
+  assertEditorContext_('checkDriveAccess');
   var result = { templateFolder: '', certificatesFolder: '', ok: false };
   try {
     result.templateFolder = DriveApp.getFolderById(TEMPLATE_FOLDER_ID).getName();
@@ -296,6 +307,7 @@ function checkDriveAccess() {
 var TOKEN_TO_VERIFY = '';
 
 function verifyPastedToken() {
+  assertEditorContext_('verifyPastedToken');
   return verifySubmitSharedToken(TOKEN_TO_VERIFY);
 }
 
@@ -304,6 +316,7 @@ function verifyPastedToken() {
  * Paste the value from .env or Netlify.
  */
 function verifySubmitSharedToken(token) {
+  assertEditorContext_('verifySubmitSharedToken');
   var expected = PropertiesService.getScriptProperties().getProperty('SUBMIT_SHARED_TOKEN_HASH');
   var result = {
     configured: !!expected,
@@ -351,6 +364,7 @@ function rememberPortalBaseUrl_(url) { url=safeTrim_(url).replace(/\/$/,'');if(!
  * its host email and temporary password.
  */
 function setupParticipantFeedbackSheets() {
+  assertEditorContext_('setupParticipantFeedbackSheets');
   var lock = LockService.getScriptLock();
   if (!lock.tryLock(30000)) throw new Error('Sheet setup is already running. Please try again.');
   try {
@@ -554,7 +568,11 @@ function auditCanonical_(entry) { return [normalizeAuditTimestamp_(entry.timesta
 function appendAuditForRequest_(action, body, success, errorMessage, actor, requestContext) {
   var secret=PropertiesService.getScriptProperties().getProperty('AUDIT_HASH_SECRET');
   if(!secret)return;
-  var lock=LockService.getScriptLock();if(!lock.tryLock(5000))return;
+  // Document lock, not the script lock: processCertificateQueue holds the
+  // script lock for its whole run (up to ~5 minutes), so audit entries written
+  // while certificates were generating were silently dropped. The document
+  // lock is only held briefly, by submitFeedback and other audit writers.
+  var lock=LockService.getDocumentLock();if(!lock.tryLock(10000)){console.warn('Audit entry skipped: document lock busy ('+action+').');return;}
   try{
     var sh=ensureAuditSheet_(),hdr=getHeaderMap_(sh),target=auditTargetForRequest_(action,body),lastRow=sh.getLastRow();
     var cHash=idxOf_(hdr,['entry_hash']),previous=lastRow>=2&&cHash>=0?safeTrim_(sh.getRange(lastRow,cHash+1).getValue()):'';
@@ -860,23 +878,26 @@ function findActivityByIdOrTitle_(activityId, title) {
 
 // ----------------- Duplicate check (server) -----------------
 /**
- * Check if a user already responded to a given Activity.
+ * Check if this email already responded to a given Activity.
  * Match priority:
  *  1) ActivityID + Email (case-insensitive)
- *  2) ActivityID + Name (case-insensitive)
- *  3) Title + Email
- *  4) Title + Name
- * Returns: {already:boolean, by:'email'|'name'|''}
+ *  2) Title + Email, for rows written before ActivityID existed
+ * Returns: {already:boolean, by:'email'|''}
+ *
+ * Names are deliberately NOT matched. Two different participants can share a
+ * name ("Maria Santos"), and name matching turned the second one away as a
+ * duplicate even with a different email. `name` stays in the signature so
+ * callers do not change.
  *
  * NOTE: Rows whose status column (cStatus) starts with "ERROR"
  *       are ignored so that failed certificate/email attempts
  *       do not permanently block re-submission.
  */
 function hasAlreadyResponded(name, email, activityId, title) {
-  name      = safeTrim_(name).toLowerCase();
   email     = safeTrim_(email).toLowerCase();
   activityId= safeTrim_(activityId).toLowerCase();
   title     = safeTrim_(title).toLowerCase();
+  if (!email) return { already: false, by: '' };
 
   var ss = SpreadsheetApp.getActiveSpreadsheet();
   var sh = ss.getSheetByName('Responses');
@@ -891,9 +912,9 @@ function hasAlreadyResponded(name, email, activityId, title) {
 
   var cTitle  = idxOf_(hdrMap, ['title of activity','title','activity title','activity']);
   var cEmail  = idxOf_(hdrMap, ['responder email','email','e-mail']);
-  var cName   = idxOf_(hdrMap, ['name']);
   var cActId  = idxOf_(hdrMap, ['activityid','activity id','id']);
-  var cStatus = idxOf_(hdrMap, ['cstatus','status','processing status']); // NEW
+  var cStatus = idxOf_(hdrMap, ['cstatus','status','processing status']);
+  if (cEmail < 0) return { already: false, by: '' };
 
   for (var i = data.length - 1; i >= 0; i--) {
     var row = data[i];
@@ -907,27 +928,16 @@ function hasAlreadyResponded(name, email, activityId, title) {
       }
     }
 
+    var rowEmail = safeTrim_(row[cEmail]).toLowerCase();
+    if (rowEmail !== email) continue;
+
     var rowTitle = (cTitle >= 0) ? safeTrim_(row[cTitle]).toLowerCase() : '';
-    var rowEmail = (cEmail >= 0) ? safeTrim_(row[cEmail]).toLowerCase() : '';
-    var rowName  = (cName  >= 0) ? safeTrim_(row[cName]).toLowerCase()  : '';
     var rowActId = (cActId >= 0) ? safeTrim_(row[cActId]).toLowerCase() : '';
 
     // 1) ActivityID + Email
-    if (activityId && rowActId && activityId === rowActId && email && rowEmail && email === rowEmail) {
-      return { already: true, by: 'email' };
-    }
-    // 2) ActivityID + Name
-    if (activityId && rowActId && activityId === rowActId && name && rowName && name === rowName) {
-      return { already: true, by: 'name' };
-    }
-    // 3) Title + Email
-    if (title && rowTitle && title === rowTitle && email && rowEmail && email === rowEmail) {
-      return { already: true, by: 'email' };
-    }
-    // 4) Title + Name
-    if (title && rowTitle && title === rowTitle && name && rowName && name === rowName) {
-      return { already: true, by: 'name' };
-    }
+    if (activityId && rowActId && activityId === rowActId) return { already: true, by: 'email' };
+    // 2) Title + Email
+    if (title && rowTitle && title === rowTitle) return { already: true, by: 'email' };
   }
   return { already: false, by: '' };
 }
@@ -947,7 +957,7 @@ function submitFeedback(formData) {
   var lock = LockService.getDocumentLock();
   lock.waitLock(20000);
 
-  var nextRow = -1;
+  var nextRow = -1, written = false;
 
   try {
     var ss = SpreadsheetApp.getActiveSpreadsheet();
@@ -979,7 +989,7 @@ function submitFeedback(formData) {
     if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(emailT) || emailT.length > 254) {
       return { status: 'BAD_REQUEST', message: 'A valid email is required.' };
     }
-    if (!formData.sex) {
+    if (!safeTrim_(formData.sex) || safeTrim_(formData.sex).length > 40) {
       return { status: 'BAD_REQUEST', message: 'Sex is required.' };
     }
     var ageNum = parseInt(formData.age, 10);
@@ -1023,8 +1033,8 @@ function submitFeedback(formData) {
     setCol_(['timestamp','date','submitted at'], new Date());
     setCol_(['name'], formData.name || '');
     setCol_(['responder email','email','e-mail'], formData.email || '');
-    setCol_(['sex'], formData.sex || '');
-    setCol_(['age'], formData.age || '');
+    setCol_(['sex'], safeTrim_(formData.sex));
+    setCol_(['age'], ageNum);
     setCol_(['activityid','activity id','id'], actIdT || '');
     setCol_(['title of activity','title','activity title','activity'], titleT || '');
     setCol_(['venue','location'], venueT || '');
@@ -1037,8 +1047,10 @@ function submitFeedback(formData) {
       setCol_(['answer'+i, 'q'+i, 'question'+i], safeTrim_(formData['answer'+i] || formData['question'+i] || '').slice(0, 2000));
     }
 
-    setCol_(['takeaways','key takeaways','most valuable takeaway'], safeTrim_(formData.takeaways || ''));
-    setCol_(['suggestions','recommendations','improvements'], safeTrim_(formData.suggestions || ''));
+    // Capped like the answers. Uncapped, a crafted request could exceed Sheets'
+    // 50,000-character cell limit and fail the whole write.
+    setCol_(['takeaways','key takeaways','most valuable takeaway'], safeTrim_(formData.takeaways || '').slice(0, 2000));
+    setCol_(['suggestions','recommendations','improvements'], safeTrim_(formData.suggestions || '').slice(0, 2000));
 
     // Email sent / Certificate link / cStatus — initialized here
     setCol_(['email sent','emailsent','email_sent','sent','date emailed'], '');
@@ -1049,15 +1061,23 @@ function submitFeedback(formData) {
 
     // Single write under lock
     sh.getRange(nextRow, 1, 1, lastCol).setValues([rowArr]);
+    written = true;
 
-    ensureCertificateQueueTrigger_();
+    // Best-effort. The response is already saved; failing the request here
+    // told the participant to try again, and their retry was accepted as a
+    // second row (ERROR rows do not count as duplicates), so an admin retry of
+    // the first later issued two certificates.
+    try { ensureCertificateQueueTrigger_(); }
+    catch (triggerError) { console.error('Queue trigger check failed: ' + String(triggerError && triggerError.message || triggerError)); }
 
   } catch (e) {
-    // Best-effort write error status back to the cStatus column IF we already know nextRow
+    // Annotate only a row that was actually written. nextRow is known before
+    // the write, so annotating after a failed write created a stray row that
+    // held nothing but an ERROR status.
     try {
       var ss2 = SpreadsheetApp.getActiveSpreadsheet();
       var sh2 = ss2.getSheetByName('Responses');
-      if (nextRow > 0 && sh2) {
+      if (written && nextRow > 0 && sh2) {
         var hdr2 = getHeaderMap_(sh2);
         var cStatus2 = idxOf_(hdr2, ['cstatus','status','processing status']);
         if (cStatus2 >= 0) {
@@ -1686,6 +1706,9 @@ function adminSaveActivity(payload, adminToken) {
   if (!title || !venue || !fromDate || !inCharge || !template || !region || !signatoryDesignation || !signature) {
     throw new Error('Please fill all required activity, region, template, and signatory fields.');
   }
+  // Keys are yyyy-MM-dd, so string order is date order. An end before the
+  // start made the feedback window empty: the activity could never open.
+  if (toDate && toDate < fromDate) throw new Error('The end date is before the start date.');
 
   var ss = SpreadsheetApp.getActiveSpreadsheet();
   var sh = ss.getSheetByName('Activity');
@@ -1706,7 +1729,8 @@ function adminSaveActivity(payload, adminToken) {
   if (isUpdate && rowId > sh.getLastRow()) throw new Error('Activity does not exist.');
   if (isUpdate) {
     // Editing an existing activity is restricted the same way as ending it.
-    assertCanManageActivity_(sh, rowId, session, 'edit');
+    var managed = assertCanManageActivity_(sh, rowId, session, 'edit');
+    assertActivityRowMatches_(managed.row, managed.hdr, payload.activityId);
     rowValues=sh.getRange(rowId,1,1,lastCol).getValues()[0];
   }
   function put(names,value){var col=idxOf_(hdr,names);if(col>=0)rowValues[col]=safeSheetValue_(value);}
@@ -1766,6 +1790,22 @@ function assertCanManageActivity_(sh, rowId, session, verb) {
   return { row: row, hdr: hdr };
 }
 
+/**
+ * Activities are addressed by sheet row number, and deleting one shifts every
+ * row below it up by one. A list loaded before that delete — in this tab or
+ * another admin's — then points each row id at its neighbour, so Edit, End or
+ * Delete silently hit the wrong activity. The client also sends the
+ * ActivityID it saw; refuse when the row no longer holds it.
+ */
+function assertActivityRowMatches_(row, hdr, expectedActivityId) {
+  var expected = safeTrim_(expectedActivityId).toLowerCase();
+  if (!expected) return;
+  var cId = idxOf_(hdr, ['activityid','activity id','id']);
+  var actual = cId >= 0 ? safeTrim_(row[cId]).toLowerCase() : '';
+  if (actual && actual !== expected)
+    throw new Error('The activity list is out of date: that row now holds a different activity. Refresh and try again.');
+}
+
 function adminSetActivityStatus(payload, adminToken) {
   var session = getAdminSession_(adminToken);
   if (!session) throw new Error('Forbidden: administrator authorization required.');
@@ -1780,6 +1820,7 @@ function adminSetActivityStatus(payload, adminToken) {
   if (rowId > sh.getLastRow()) throw new Error('Activity does not exist.');
 
   var managed = assertCanManageActivity_(sh, rowId, session, active ? 'reopen' : 'end');
+  assertActivityRowMatches_(managed.row, managed.hdr, payload.activityId);
   var cActive = idxOf_(managed.hdr, ['active','enabled','status']);
   if (cActive < 0) throw new Error('Activity sheet is missing the Active column. Run setupParticipantFeedbackSheets().');
 
@@ -1789,7 +1830,7 @@ function adminSetActivityStatus(payload, adminToken) {
 }
 
 /** DELETE a row by its sheet row index (the "Row" shown in the table) */
-function adminDeleteActivity(id, adminToken) {
+function adminDeleteActivity(id, adminToken, expectedActivityId) {
   var session = getAdminSession_(adminToken);
   if (!session) throw new Error('Forbidden: administrator authorization required.');
   var rowId = parseInt(String(id || ''), 10);
@@ -1801,7 +1842,8 @@ function adminDeleteActivity(id, adminToken) {
 
   var lastRow = sh.getLastRow();
   if (rowId > lastRow) throw new Error('Row does not exist.');
-  assertCanManageActivity_(sh, rowId, session, 'delete');
+  var managed = assertCanManageActivity_(sh, rowId, session, 'delete');
+  assertActivityRowMatches_(managed.row, managed.hdr, expectedActivityId);
   sh.deleteRow(rowId);
   invalidatePublicCache_();
   return 'OK';
@@ -2050,13 +2092,15 @@ function adminSaveUser(payload, adminToken) {
   if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) throw new Error('A valid email is required.');
   if (['admin','superadmin'].indexOf(role) < 0) throw new Error('Role must be admin or superadmin.');
   if (session.email === email && (role !== 'superadmin' || !active)) throw new Error('You cannot demote or deactivate your own superadmin account.');
-  var lock = LockService.getScriptLock();
+  // Document lock: the script lock is held by the certificate generator for
+  // minutes at a time, which made saving a user fail as "busy" mid-event.
+  var lock = LockService.getDocumentLock();
   if (!lock.tryLock(10000)) throw new Error('User management is busy. Please try again.');
   try {
     var existing = findRowByEmail_(ensureWhitelistSheet_(), email);
     if (!existing && password.length < 12) throw new Error('New users require a password of at least 12 characters.');
     if (password && password.length < 12) throw new Error('Passwords must contain at least 12 characters.');
-    if (password) seedUser(email, password, name, role, active); else syncCredentialMetadata_({email:email,name:name,role:role,active:active});
+    if (password) seedUser_(email, password, name, role, active); else syncCredentialMetadata_({email:email,name:name,role:role,active:active});
     // Drop the cached lookup so a deactivation or role change is enforced on
     // the account's very next request rather than after the TTL.
     invalidateCredentialUser_(email);
@@ -2084,8 +2128,9 @@ function adminSaveQuestions(questions, adminToken) {
     };
   });
   if (questions.some(function(question){return !question.text;})) throw new Error('Questions cannot be blank.');
-  if (questions.some(function(question){return QUESTION_TYPES.indexOf(question.type) < 0;})) throw new Error('Question type must be rating or text.');
-  var sh = ensureQuestionsSheet_(), lock = LockService.getScriptLock();
+  if (questions.some(function(question){return QUESTION_TYPES.indexOf(question.type) < 0;})) throw new Error('Question type must be rating, yes/no, or text.');
+  // Document lock for the same reason as adminSaveUser.
+  var sh = ensureQuestionsSheet_(), lock = LockService.getDocumentLock();
   if (!lock.tryLock(10000)) throw new Error('Question management is busy. Please try again.');
   try {
     sh.getRange(2,1,1,30).setValues([
@@ -2139,15 +2184,22 @@ function ensureQuestionsSheet_() {
 
 // ----------------------- Admin credentials & sessions -----------------------
 function seedUsers() {
+  assertEditorContext_('seedUsers');
   // Edit these values before running this function once from the Apps Script editor.
   var users = [
     { email:'host@example.com', password:'CHANGE_THIS_PASSWORD', name:'Portal Host', role:'superadmin' }
   ];
   if (users.some(function(user){return user.password === 'CHANGE_THIS_PASSWORD';})) throw new Error('Edit seedUsers() and replace CHANGE_THIS_PASSWORD before running it.');
-  return users.map(function(user){return seedUser(user.email,user.password,user.name,user.role);});
+  return users.map(function(user){return seedUser_(user.email,user.password,user.name,user.role);});
 }
 
+/** Editor entry point. adminSaveUser calls seedUser_ directly. */
 function seedUser(email, password, displayName, role, active) {
+  assertEditorContext_('seedUser');
+  return seedUser_(email, password, displayName, role, active);
+}
+
+function seedUser_(email, password, displayName, role, active) {
   email=safeTrim_(email).toLowerCase(); password=String(password||''); displayName=safeTrim_(displayName); role=safeTrim_(role||'admin').toLowerCase(); active=active !== false;
   if(!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email))throw new Error('A valid user email is required.');
   if(password.length<12)throw new Error('Admin passwords must contain at least 12 characters.');
@@ -2183,8 +2235,28 @@ function adminLogin(email,password) {
   if(verified.upgrade&&cHash>=0&&matchRow>1){try{sh.getRange(matchRow,cHash+1).setValue(hashAdminPasswordV2_(password,match[cSalt]));}catch(ignored){}}
   cache.remove(throttleKey);
   var token=Utilities.getUuid().replace(/-/g,'')+Utilities.getUuid().replace(/-/g,''),session={email:email,name:safeTrim_(match[cName])||email,role:safeTrim_(match[cRole])||'admin',expiresAt:Date.now()+21600000};
+  pruneExpiredAdminSessions_();
   var key=adminSessionKey_(token),json=JSON.stringify(session);CacheService.getScriptCache().put(key,json,21600);PropertiesService.getScriptProperties().setProperty(key,json);
   return {token:token,user:{email:session.email,name:session.name,role:session.role},expiresAt:session.expiresAt};
+}
+
+/**
+ * Every login writes a session into Script Properties, but an expired one was
+ * only removed if its token was used again — and a closed tab never comes
+ * back. Script Properties cap out at 500 KB in total, so the entries piled up
+ * until setProperty failed, and then no one could sign in (and PORTAL_BASE_URL
+ * could no longer be saved). Sweeping at login keeps the store bounded.
+ */
+function pruneExpiredAdminSessions_() {
+  try {
+    var properties = PropertiesService.getScriptProperties(), all = properties.getProperties(), now = Date.now();
+    Object.keys(all).forEach(function(key){
+      if (key.indexOf('ADMIN_SESSION_') !== 0) return;
+      var session = null;
+      try { session = JSON.parse(all[key]); } catch (ignored) {}
+      if (!session || !session.expiresAt || session.expiresAt < now) properties.deleteProperty(key);
+    });
+  } catch (ignored) {}
 }
 
 function adminValidateSession(token){var session=getAdminSession_(token);if(!session)throw new Error('Your admin session has expired.');return{user:{email:session.email,name:session.name,role:session.role},expiresAt:session.expiresAt};}
@@ -2279,6 +2351,7 @@ function verifyAdminPassword_(password, salt, storedHash) {
 
 /** Times both formats. Run from the editor to see the difference. */
 function benchmarkLoginHash() {
+  assertEditorContext_('benchmarkLoginHash');
   var salt = Utilities.getUuid(), password = 'benchmark-password-only';
   var t0 = Date.now(); hashAdminPasswordLegacy_(password, salt); var legacy = Date.now() - t0;
   var t1 = Date.now(); hashAdminPasswordV2_(password, salt); var v2 = Date.now() - t1;
@@ -2337,6 +2410,7 @@ function certificateFileCount_() {
  * resetTestingData() will remove.
  */
 function previewTestingDataReset() {
+  assertEditorContext_('previewTestingDataReset');
   var properties = PropertiesService.getScriptProperties().getProperties();
   var sessions = Object.keys(properties).filter(function(key){ return key.indexOf('ADMIN_SESSION_') === 0; }).length;
   var summary = {
@@ -2366,6 +2440,7 @@ function previewTestingDataReset() {
  * Certificates are trashed, not purged, so Drive's trash is a 30-day undo.
  */
 function resetTestingData(confirmation, options) {
+  assertEditorContext_('resetTestingData');
   if (safeTrim_(confirmation) !== RESET_CONFIRMATION_PHRASE)
     throw new Error(
       'Refusing to delete anything. Run previewTestingDataReset() first, then call ' +
@@ -2458,6 +2533,7 @@ function __authCheck2() {
  *   - rows verify but head fails → the last entries were deleted
  */
 function auditChainDiagnose() {
+  assertEditorContext_('auditChainDiagnose');
   var props = PropertiesService.getScriptProperties();
   var secret = props.getProperty('AUDIT_HASH_SECRET') || '';
   var expectedHead = props.getProperty('AUDIT_HEAD_HASH') || '';
@@ -2759,8 +2835,9 @@ function adminGetCertificateQueue(filters, adminToken) {
  * Put failed rows back in the queue. Setting the status to PENDING is all that
  * is needed: processCertificateQueue picks them up on its next run.
  *
- * Only FAILED rows may be retried. Re-queueing an ISSUED row would generate a
- * second certificate and email the participant again.
+ * Only FAILED and orphaned PROCESSING rows may be retried. Re-queueing an
+ * ISSUED row would generate a second certificate and email the participant
+ * again.
  */
 function adminRetryCertificates(payload, adminToken) {
   if (!isAdminAuthorized_(adminToken)) throw new Error('Forbidden: administrator authorization required.');
@@ -2783,7 +2860,13 @@ function adminRetryCertificates(payload, adminToken) {
       var rowIndex = parseInt(String(rows[i]), 10);
       if (!isFinite(rowIndex) || rowIndex < 2 || rowIndex > lastRow) { skipped.push(rows[i]); continue; }
       var current = certificateState_(sh.getRange(rowIndex, cStatus + 1).getValue());
-      if (current.state !== 'FAILED') { skipped.push(rowIndex); continue; }
+      // PROCESSING is retryable too, and safely so: processCertificateQueue holds
+      // this same script lock for its entire run, and we hold it now. So no run
+      // is in progress, and a PROCESSING row can only be one whose execution was
+      // killed mid-certificate (6-minute limit, quota) before it could record
+      // OK or ERROR. Without this such a row stayed stuck forever: the queue
+      // only takes PENDING and this endpoint only took FAILED.
+      if (current.state !== 'FAILED' && current.state !== 'PROCESSING') { skipped.push(rowIndex); continue; }
       sh.getRange(rowIndex, cStatus + 1).setValue('PENDING');
       requeued++;
     }

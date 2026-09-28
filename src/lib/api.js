@@ -118,7 +118,15 @@ async function remote(action, payload = {}, attempt = 0) {
     }
     if (!response.ok || data.ok === false)
       throw new Error(data.error || "Request failed");
-    return data.data ?? data;
+    const result = data.data ?? data;
+    // A retry that comes back DUP almost always found our OWN first attempt.
+    // The proxy gives up on Apps Script after 30s, but that only abandons the
+    // wait — the execution carries on and writes the row. Reporting "you
+    // already responded" would tell a participant whose submission succeeded
+    // that something went wrong.
+    if (action === "submitFeedback" && attempt > 0 && result?.status === "DUP")
+      return { status: "QUEUED", message: "Feedback received." };
+    return result;
   } catch (error) {
     const retryable =
       /lock|busy|simultaneous|too many|network|fetch|temporar|timeout/i.test(
@@ -210,8 +218,10 @@ export async function saveActivity(payload) {
   if (!DEMO_MODE) requireBackend();
   return payload;
 }
-export async function setActivityStatus(id, active) {
-  const payload = { id, active };
+// activityId travels with the row number so the server can refuse a stale
+// list: deleting an activity shifts every row below it.
+export async function setActivityStatus(id, active, activityId = "") {
+  const payload = { id, active, activityId };
   invalidate("activities:");
   invalidate("dashboard:");
   invalidate("queue:"); // ending an activity holds its queued certificates
@@ -225,13 +235,19 @@ export async function setActivityStatus(id, active) {
   if (!DEMO_MODE) requireBackend();
   return { id, active };
 }
-export async function deleteActivity(id) {
+export async function deleteActivity(id, activityId = "") {
   invalidate("activities:");
   invalidate("dashboard:");
+  invalidate("responses:");
+  invalidate("queue:");
   if (window.google?.script)
-    return gasRun("adminDeleteActivity", id, adminToken());
+    return gasRun("adminDeleteActivity", id, adminToken(), activityId);
   if (HAS_REMOTE)
-    return remote("adminDeleteActivity", { id, adminToken: adminToken() });
+    return remote("adminDeleteActivity", {
+      id,
+      activityId,
+      adminToken: adminToken(),
+    });
   if (!DEMO_MODE) requireBackend();
   return true;
 }
@@ -384,19 +400,29 @@ export async function getCertificateQueue(filters = {}, { force = false } = {}) 
     heldActivities: [],
   };
 }
+// The server accepts at most 100 rows per call, but the Failed tab lists up
+// to 300, so "Retry all" has to be sent in batches.
+const RETRY_BATCH = 100;
 export async function retryCertificates(rows) {
-  const payload = { rows };
   invalidate("queue:");
   invalidate("responses:");
-  if (window.google?.script)
-    return gasRun("adminRetryCertificates", payload, adminToken());
-  if (HAS_REMOTE)
-    return remote("adminRetryCertificates", {
-      payload,
-      adminToken: adminToken(),
-    });
-  if (!DEMO_MODE) requireBackend();
-  return { requeued: rows.length, skipped: [] };
+  if (!window.google?.script && !HAS_REMOTE) {
+    if (!DEMO_MODE) requireBackend();
+    return { requeued: rows.length, skipped: [] };
+  }
+  const total = { requeued: 0, skipped: [] };
+  for (let i = 0; i < rows.length; i += RETRY_BATCH) {
+    const payload = { rows: rows.slice(i, i + RETRY_BATCH) };
+    const result = window.google?.script
+      ? await gasRun("adminRetryCertificates", payload, adminToken())
+      : await remote("adminRetryCertificates", {
+          payload,
+          adminToken: adminToken(),
+        });
+    total.requeued += result?.requeued || 0;
+    total.skipped.push(...(result?.skipped || []));
+  }
+  return total;
 }
 export async function getAdminAuditLog(filters = {}) {
   if (window.google?.script)
