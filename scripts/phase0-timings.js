@@ -16,8 +16,14 @@
  * Apps Script. "appsScriptStartup" reaches it but does no sheet work. What a
  * row takes beyond appsScriptStartup is the sheet work itself, which is the
  * part Postgres replaces.
+ *
+ * "verifyCertificate" checks a made-up code. That always searches the sheet,
+ * because only issued certificates are cached. To time the cache, put the
+ * verification code of a real issued certificate in VERIFY_CODE below; it adds
+ * a "verifyIssuedCertificate" row.
  */
 (async () => {
+  const VERIFY_CODE = ""; // e.g. "CHED-0123456789ABCDEF0123"
   const PROXY = "/.netlify/functions/gas-proxy";
   const RUNS = 5;
   let token = "";
@@ -45,6 +51,9 @@
     ["verifyCertificate", () =>
       post({ action: "verifyCertificate", code: "CHED-00000000000000000000" })],
   ];
+  if (VERIFY_CODE.trim())
+    probes.push(["verifyIssuedCertificate", () =>
+      post({ action: "verifyCertificate", code: VERIFY_CODE.trim() })]);
   if (token)
     probes.push(
       ["adminValidateSession", admin("adminValidateSession")],
@@ -68,6 +77,8 @@
         if (request !== "netlifyOnly" && request !== "appsScriptStartup") {
           const data = JSON.parse(text);
           if (data.ok === false) note = String(data.error || "failed").slice(0, 80);
+          else if (request === "verifyIssuedCertificate" && !data.data?.valid)
+            note = "VERIFY_CODE did not verify: use an issued certificate's code";
         }
       } catch (error) {
         note = String(error?.message || error).slice(0, 80);

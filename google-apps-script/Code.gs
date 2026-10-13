@@ -1128,9 +1128,39 @@ function ensureResponseVerification_(sheet, header, rowIndex, rowValues) {
   return {code:code,url:url};
 }
 
+/**
+ * A verified certificate is cached for 6 hours, so scanning the same QR code
+ * again skips the column search (phase 0 measured 2.5-9.5 s per scan).
+ *
+ * Only a valid result is cached. A code is created at submission but reads as
+ * invalid until its certificate is issued, so caching "not found" would keep
+ * a certificate unverifiable for hours after it was emailed. An issued
+ * certificate is never un-issued by the portal, so a cached "valid" stays
+ * true; resetTestingData() starts a new cache generation when it clears
+ * responses. An edit made directly in the sheet shows within 6 hours.
+ *
+ * The queue also fills the cache the moment it issues a certificate, so the
+ * first scan is fast too. After the 6 hours run out, the next scan searches
+ * the sheet once and refills it.
+ */
+var VERIFY_CACHE_SECONDS = 21600;
+
+function verifyCacheKey_(code) {
+  var generation = PropertiesService.getScriptProperties().getProperty('VERIFY_CACHE_GENERATION') || '0';
+  return 'VERIFY_' + generation + '_' + code;
+}
+
 function verifyCertificate(code) {
   code=safeTrim_(code).toUpperCase();
   if(!/^CHED-[A-F0-9]{20}$/.test(code))return {valid:false};
+  var cache=CacheService.getScriptCache(),cacheKey=verifyCacheKey_(code);
+  try{var hit=cache.get(cacheKey);if(hit)return JSON.parse(hit);}catch(ignored){}
+  var result=lookupCertificate_(code);
+  if(result.valid){try{cache.put(cacheKey,JSON.stringify(result),VERIFY_CACHE_SECONDS);}catch(ignored){}}
+  return result;
+}
+
+function lookupCertificate_(code) {
   var sh=SpreadsheetApp.getActiveSpreadsheet().getSheetByName('Responses');
   if(!sh||sh.getLastRow()<2)return {valid:false};
   var hdr=getHeaderMap_(sh),cCode=idxOf_(hdr,['verification code','verification id','certificate id']),cStatus=idxOf_(hdr,['cstatus','status','processing status']);
@@ -1138,9 +1168,37 @@ function verifyCertificate(code) {
   var match=sh.getRange(2,cCode+1,sh.getLastRow()-1,1).createTextFinder(code).matchEntireCell(true).matchCase(false).findNext();
   if(!match)return {valid:false};
   var row=sh.getRange(match.getRow(),1,1,sh.getLastColumn()).getValues()[0];
-  if(safeTrim_(row[cStatus]).toUpperCase()!=='OK')return {valid:false};
+  return certificateResultFromRow_(row,hdr,code);
+}
+
+/**
+ * The verification page's answer for one Responses row. Shared by the lookup
+ * and by the queue's cache pre-fill, so a pre-filled answer can never differ
+ * from a looked-up one.
+ */
+function certificateResultFromRow_(row, hdr, code) {
+  var cStatus=idxOf_(hdr,['cstatus','status','processing status']);
+  if(cStatus<0||safeTrim_(row[cStatus]).toUpperCase()!=='OK')return {valid:false};
   function value(names){var col=idxOf_(hdr,names);return col>=0?row[col]:'';}
   return {valid:true,verificationCode:code,name:safeTrim_(value(['name'])),activity:safeTrim_(value(['title of activity','title','activity title'])),activityDate:fmtDate_(value(['activity_date','date of activity'])),venue:safeTrim_(value(['venue','location'])),issuedAt:fmtDate_(value(['email sent','date emailed'])),certificateUrl:safeTrim_(value(['certificate link','certificate','certificate url']))};
+}
+
+/**
+ * Called by the queue the moment a certificate is issued, so the very first
+ * scan of its QR code is answered from cache instead of searching the sheet.
+ * Costs one row read per certificate, inside the background run. `hdr` may
+ * predate a Verification Code column that this run added; it is re-read then.
+ */
+function cacheIssuedCertificate_(sheet, hdr, rowIndex) {
+  var row=sheet.getRange(rowIndex,1,1,sheet.getLastColumn()).getValues()[0];
+  var codeNames=['verification code','verification id','certificate id'],cCode=idxOf_(hdr,codeNames);
+  if(cCode<0){hdr=getHeaderMap_(sheet);cCode=idxOf_(hdr,codeNames);}
+  var code=cCode>=0?safeTrim_(row[cCode]).toUpperCase():'';
+  if(!/^CHED-[A-F0-9]{20}$/.test(code))return false;
+  var result=certificateResultFromRow_(row,hdr,code);
+  if(!result.valid)return false;
+  CacheService.getScriptCache().put(verifyCacheKey_(code),JSON.stringify(result),VERIFY_CACHE_SECONDS);
+  return true;
 }
 
 /**
@@ -1198,6 +1256,9 @@ function processCertificateQueue() {
         if (cEmailSent >= 0) sh.getRange(rowIndex, cEmailSent + 1).setValue(meta.emailStatus || 'No recipient email');
         sh.getRange(rowIndex, cStatus + 1).setValue('OK');
         processed++;
+        // Best-effort, and caught here so a cache hiccup can never mark an
+        // issued certificate as failed.
+        try { cacheIssuedCertificate_(sh, hdr, rowIndex); } catch (cacheError) {}
       } catch (error) {
         sh.getRange(rowIndex, cStatus + 1).setValue('ERROR: ' + String(error.message || error).slice(0, 450));
         failed++;
@@ -2260,9 +2321,27 @@ function pruneExpiredAdminSessions_() {
 }
 
 function adminValidateSession(token){var session=getAdminSession_(token);if(!session)throw new Error('Your admin session has expired.');return{user:{email:session.email,name:session.name,role:session.role},expiresAt:session.expiresAt};}
-function adminLogout(token){var key=adminSessionKey_(token);CacheService.getScriptCache().remove(key);PropertiesService.getScriptProperties().deleteProperty(key);return true;}
+function adminLogout(token){delete adminSessionMemo_[safeTrim_(token)];var key=adminSessionKey_(token);CacheService.getScriptCache().remove(key);PropertiesService.getScriptProperties().deleteProperty(key);return true;}
+
+/**
+ * Sessions already looked up in THIS execution. Apps Script starts every
+ * request with fresh globals, so this lives for one request and no longer.
+ *
+ * One admin request used to check the session up to four times: doPost reads
+ * it to name the audit actor, then the action checks it, and the dashboard's
+ * two halves check it again each. Every check costs several Properties and
+ * Cache calls (phase 0 measured about half a second each), and none of them
+ * can give a different answer within a single request.
+ */
+var adminSessionMemo_ = {};
+
 function getAdminSession_(token){
   token=safeTrim_(token);if(!token)return null;
+  if(Object.prototype.hasOwnProperty.call(adminSessionMemo_,token))return adminSessionMemo_[token];
+  return (adminSessionMemo_[token]=loadAdminSession_(token));
+}
+
+function loadAdminSession_(token){
   var key=adminSessionKey_(token),cache=CacheService.getScriptCache(),json=cache.get(key)||PropertiesService.getScriptProperties().getProperty(key);
   if(!json)return null;
   try{
@@ -2459,7 +2538,12 @@ function resetTestingData(confirmation, options) {
 
   var result = { startedAt: new Date().toISOString(), responses: 0, activities: 0, auditEntries: 0, certificatesTrashed: 0, certificatesRemaining: 0, adminSessions: 0 };
   try {
-    if (doResponses) result.responses = clearSheetRows_('Responses');
+    if (doResponses) {
+      result.responses = clearSheetRows_('Responses');
+      // Cached verifications point at rows that no longer exist; a new
+      // generation makes every cached entry unreachable.
+      PropertiesService.getScriptProperties().setProperty('VERIFY_CACHE_GENERATION', String(Date.now()));
+    }
     if (doActivities) result.activities = clearSheetRows_('Activity');
 
     if (doCertificates) {
@@ -2564,15 +2648,19 @@ function auditChainDiagnose() {
   }
   out.headMatches = !expectedHead || previous === expectedHead;
 
+  // A reformatted timestamp used to be checked first and reported as a reason
+  // the hashes "cannot match". auditCanonical_ now normalizes it before
+  // hashing, so that is no longer true: with zero failures the chain is
+  // intact, and the reformatting is only a note.
   out.verdict = !secret
     ? 'AUDIT_HASH_SECRET is missing. Nothing can be verified. It is set by setupParticipantFeedbackSheets().'
-    : out.timestampReformatted
-      ? 'Timestamps were reformatted by Google Sheets, so their hashes cannot match. This is a formatting artifact, NOT tampering. ensureAuditSheet_() now pins the column to plain text; clear the log once (resetTestingData with auditLog:true) and future rows will verify.'
+    : !out.hashFailures && !out.linkFailures
+      ? (out.headMatches
+          ? 'Chain is intact.' + (out.timestampReformatted ? ' Some timestamps display without a leading zero; the check corrects for that, so it is not a problem.' : '')
+          : 'Rows verify but the head does not: the most recent entries were deleted.')
       : out.hashFailures === out.rows
         ? 'Every row fails: AUDIT_HASH_SECRET changed after these rows were written.'
-        : out.hashFailures || out.linkFailures
-          ? 'Some rows fail starting at sheet row ' + out.firstBadRow + '. Those rows were edited or deleted directly in Sheets.'
-          : out.headMatches ? 'Chain is intact.' : 'Rows verify but the head does not: the most recent entries were deleted.';
+        : 'Some rows fail starting at sheet row ' + out.firstBadRow + '. Those rows were edited or deleted directly in Sheets.';
   Logger.log(JSON.stringify(out, null, 2));
   return out;
 }
