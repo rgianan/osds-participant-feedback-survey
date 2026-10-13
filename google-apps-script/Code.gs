@@ -2578,6 +2578,151 @@ function auditChainDiagnose() {
 }
 
 /**
+ * Phase 0 of the Supabase migration. Read-only: run it from the editor and
+ * paste the logged JSON into the migration plan.
+ *
+ * It answers three questions before any import code is written:
+ *   1. How much data moves (rows, columns, approximate size)?
+ *   2. Where a request's time goes inside Apps Script: the sheet reads, the
+ *      duplicate scan on every submission, the user lookup on every admin call.
+ *   3. Which rows the new database would refuse. Its constraints are stricter
+ *      than a spreadsheet: one response per activity and email, unique
+ *      verification codes, real dates, a known activity behind every response.
+ *
+ * The log holds counts and sheet row numbers only, never names, emails or
+ * answers, so it is safe to paste into a shared document.
+ */
+function phase0Baseline() {
+  assertEditorContext_('phase0Baseline');
+  var ss = SpreadsheetApp.getActiveSpreadsheet(), SAMPLE = 10;
+  var out = { generatedAt: new Date().toISOString(), timeZone: Session.getScriptTimeZone(), sheets: {}, timingsMs: {}, responses: {}, activities: {}, admins: {}, scriptProperties: {}, issues: {} };
+  function time(label, fn) { var started = Date.now(), result = fn(); out.timingsMs[label] = Date.now() - started; return result; }
+  function isDate(value) { return Object.prototype.toString.call(value) === '[object Date]' && !isNaN(value); }
+  function issue(key, sheetRow) { var entry = out.issues[key] || (out.issues[key] = { count: 0, sampleRows: [] }); entry.count++; if (entry.sampleRows.length < SAMPLE) entry.sampleRows.push(sheetRow); }
+  function dataRows(sheet) { return sheet && sheet.getLastRow() >= 2 ? sheet.getRange(2, 1, sheet.getLastRow() - 1, sheet.getLastColumn()).getValues() : []; }
+  function headers(sheet) { return sheet ? getHeaderMap_(sheet) : {}; }
+
+  ['Activity','Responses','Questions','Whitelist','Users','Audit'].forEach(function(name){
+    var sheet = ss.getSheetByName(name);
+    out.sheets[name] = sheet ? { rows: Math.max(0, sheet.getLastRow() - 1), columns: sheet.getLastColumn() } : 'missing';
+  });
+
+  // --- What a request costs inside Apps Script today. Clearing the public
+  // cache first times the uncached path; these calls refill it.
+  CacheService.getScriptCache().removeAll([activitiesCacheKey_(), 'PUBLIC_QUESTIONS']);
+  time('activityListUncached', function(){ return getActivityData(); });
+  time('activityListCached', function(){ return getActivityData(); });
+  time('questionsUncached', function(){ return getQuestions(); });
+  var respSheet = ss.getSheetByName('Responses');
+  var responses = time('readWholeResponsesSheet', function(){ return dataRows(respSheet); });
+  time('duplicateCheckPerSubmission', function(){ return hasAlreadyResponded('', 'phase0-probe@example.invalid', 'A-PHASE0', ''); });
+  time('userLookupPerAdminRequest', function(){ return readCredentialUser_('phase0-probe@example.invalid'); });
+  out.responses.approxMegabytes = Number((JSON.stringify(responses).length / 1048576).toFixed(2));
+
+  // --- Activities
+  var actSheet = ss.getSheetByName('Activity'), activities = dataRows(actSheet), aHdr = headers(actSheet);
+  var aId = idxOf_(aHdr, ['activityid','activity id','id']), aTitle = idxOf_(aHdr, ['title','activity title','activity']);
+  var aFrom = idxOf_(aHdr, ['fromdate','from date','start']), aTo = idxOf_(aHdr, ['todate','to date','end']);
+  var aActive = idxOf_(aHdr, ['active','enabled','status']), aOwner = idxOf_(aHdr, ['created by','createdby','owner','creator']);
+  var knownIds = {}, knownTitles = {}, activeValues = {};
+  activities.forEach(function(row, i){
+    var sheetRow = i + 2;
+    var id = aId >= 0 ? safeTrim_(row[aId]).toLowerCase() : '', title = aTitle >= 0 ? safeTrim_(row[aTitle]).toLowerCase() : '';
+    if (!id) issue('activityMissingId', sheetRow); else if (knownIds[id]) issue('activityDuplicateId', sheetRow); else knownIds[id] = true;
+    if (title) knownTitles[title] = true;
+    if (aFrom >= 0 && row[aFrom] !== '' && !isDate(row[aFrom])) issue('activityStartDateIsText', sheetRow);
+    if (aTo >= 0 && row[aTo] !== '' && !isDate(row[aTo])) issue('activityEndDateIsText', sheetRow);
+    var from = aFrom >= 0 ? fmtDate_(row[aFrom]) : '', to = aTo >= 0 ? fmtDate_(row[aTo]) : '';
+    // Only real dates compare; a text date is already reported above.
+    if (parseDateKey_(from) && parseDateKey_(to) && to < from) issue('activityEndsBeforeStart', sheetRow);
+    if (aOwner >= 0 && !safeTrim_(row[aOwner])) issue('activityWithoutOwner', sheetRow);
+    if (aActive >= 0) { var raw = safeTrim_(row[aActive]).toUpperCase() || '(blank)'; activeValues[raw] = (activeValues[raw] || 0) + 1; }
+  });
+  out.activities = { count: activities.length, activeCellValues: activeValues };
+
+  // --- Responses
+  var c = responseColumns_(headers(respSheet));
+  var byState = {}, byYear = {}, perActivity = {}, seenKeys = {}, seenCodes = {}, oldest = null, newest = null;
+  responses.forEach(function(row, i){
+    var sheetRow = i + 2;
+    function cell(col) { return col >= 0 ? row[col] : ''; }
+    var state = certificateState_(cell(c.status)).state;
+    byState[state] = (byState[state] || 0) + 1;
+    if (['QUEUED','PROCESSING','ISSUED','FAILED'].indexOf(state) < 0) issue('responseUnknownStatus', sheetRow);
+    var stamp = cell(c.timestamp);
+    if (isDate(stamp)) {
+      var year = stamp.getFullYear(); byYear[year] = (byYear[year] || 0) + 1;
+      if (!oldest || stamp < oldest) oldest = stamp;
+      if (!newest || stamp > newest) newest = stamp;
+    } else issue('responseTimestampNotDate', sheetRow);
+    var id = safeTrim_(cell(c.activityId)).toLowerCase(), title = safeTrim_(cell(c.title)).toLowerCase(), email = safeTrim_(cell(c.email)).toLowerCase();
+    var activityKey = id || ('title:' + title);
+    perActivity[activityKey] = (perActivity[activityKey] || 0) + 1;
+    if (!(id && knownIds[id]) && !(title && knownTitles[title])) issue('responseActivityNotFound', sheetRow);
+    if (!id) issue('responseMissingActivityId', sheetRow);
+    // Mirrors the planned unique index: one non-failed response per activity and email.
+    if (!email) issue('responseMissingEmail', sheetRow);
+    else if (state !== 'FAILED') {
+      var key = activityKey + '|' + email;
+      if (seenKeys[key]) issue('responseDuplicateActivityEmail', sheetRow); else seenKeys[key] = true;
+    }
+    var code = safeTrim_(cell(c.verificationCode)).toUpperCase();
+    if (code) {
+      if (!/^CHED-[A-F0-9]{20}$/.test(code)) issue('responseMalformedVerificationCode', sheetRow);
+      if (seenCodes[code]) issue('responseDuplicateVerificationCode', sheetRow); else seenCodes[code] = true;
+    } else if (state === 'ISSUED') issue('issuedWithoutVerificationCode', sheetRow);
+    var age = parseInt(cell(c.age), 10);
+    if (!(age >= 1 && age <= 120)) issue('responseAgeOutOfRange', sheetRow);
+  });
+  var perActivityCounts = Object.keys(perActivity).map(function(key){ return perActivity[key]; });
+  out.responses.count = responses.length;
+  out.responses.byCertificateState = byState;
+  out.responses.byYear = byYear;
+  out.responses.activitiesWithResponses = perActivityCounts.length;
+  out.responses.largestActivity = perActivityCounts.length ? Math.max.apply(null, perActivityCounts) : 0;
+  out.responses.oldest = oldest ? fmtDate_(oldest) : '';
+  out.responses.newest = newest ? fmtDate_(newest) : '';
+
+  // --- Administrators: the two sheets merge into one table.
+  var usersSheet = ss.getSheetByName('Users'), wlSheet = ss.getSheetByName('Whitelist');
+  var uHdr = headers(usersSheet), wHdr = headers(wlSheet);
+  var uEmail = idxOf_(uHdr, ['email']), uHash = idxOf_(uHdr, ['passwordhash','password hash']), wEmail = idxOf_(wHdr, ['email','e-mail']);
+  var whitelisted = {}, logins = {}, legacyHashes = 0, userCount = 0;
+  dataRows(wlSheet).forEach(function(row){ var email = wEmail >= 0 ? safeTrim_(row[wEmail]).toLowerCase() : ''; if (email) whitelisted[email] = true; });
+  dataRows(usersSheet).forEach(function(row, i){
+    var email = uEmail >= 0 ? safeTrim_(row[uEmail]).toLowerCase() : '';
+    if (!email) return;
+    userCount++;
+    if (logins[email]) issue('userDuplicateEmail', i + 2); else logins[email] = true;
+    if (!whitelisted[email]) issue('userMissingFromWhitelist', i + 2);
+    if (uHash >= 0 && safeTrim_(row[uHash]).indexOf('v2:') !== 0) legacyHashes++;
+  });
+  dataRows(wlSheet).forEach(function(row, i){ var email = wEmail >= 0 ? safeTrim_(row[wEmail]).toLowerCase() : ''; if (email && !logins[email]) issue('whitelistWithoutLogin', i + 2); });
+  out.admins = { users: userCount, legacyPasswordHashes: legacyHashes };
+
+  // --- Script Properties (500 KB cap), mail quota, queue trigger, audit chain
+  var props = PropertiesService.getScriptProperties().getProperties(), now = Date.now(), sessions = 0, expired = 0, bytes = 0;
+  Object.keys(props).forEach(function(key){
+    bytes += key.length + String(props[key]).length;
+    if (key.indexOf('ADMIN_SESSION_') !== 0) return;
+    sessions++;
+    try { if (!(JSON.parse(props[key]).expiresAt > now)) expired++; } catch (ignored) { expired++; }
+  });
+  out.scriptProperties = { keys: Object.keys(props).length, adminSessions: sessions, expiredSessions: expired, approxKilobytes: Number((bytes / 1024).toFixed(1)), limitKilobytes: 500 };
+  out.mailQuotaRemainingToday = MailApp.getRemainingDailyQuota();
+  out.queueTriggers = ScriptApp.getProjectTriggers().filter(function(trigger){ return trigger.getHandlerFunction() === 'processCertificateQueue'; }).length;
+  try { var audit = auditChainDiagnose(); out.auditChain = { rows: audit.rows, verdict: audit.verdict }; }
+  catch (auditError) { out.auditChain = { error: String(auditError && auditError.message || auditError) }; }
+
+  var issueKeys = Object.keys(out.issues);
+  out.issueSummary = issueKeys.length
+    ? issueKeys.map(function(key){ return key + ': ' + out.issues[key].count; }).join(', ')
+    : 'None: every row fits the new schema.';
+  Logger.log(JSON.stringify(out, null, 2));
+  return out;
+}
+
+/**
  * Certificate email. Built with tables and inline styles because Gmail,
  * Outlook and most mobile clients strip <style> blocks and ignore flexbox.
  * Every interpolated value is escaped: the participant's name and the activity
