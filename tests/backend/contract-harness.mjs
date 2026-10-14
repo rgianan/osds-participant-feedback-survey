@@ -1,10 +1,12 @@
-import { createHash, createHmac, randomUUID } from "node:crypto";
-import { readFileSync } from "node:fs";
-import vm from "node:vm";
 import { handleAction } from "../../netlify/backend/actions.mjs";
 import { auditCanonical } from "../../netlify/backend/audit.mjs";
 import { hmacBase64, sha256Base64 } from "../../netlify/backend/crypto.mjs";
+import { codeGs, json, standInSheet as sheet } from "../../scripts/lib/code-gs.mjs";
 import { freshDatabase, nextCode, seedSession } from "./helpers.mjs";
+
+export {
+  comparableAnalytics, comparableQueue, comparableResponses, flatQuestions, json, withoutKeys, withoutQuestionDetail,
+} from "../../scripts/lib/code-gs.mjs";
 
 /**
  * Contract tests (migration plan, phase 1): the same data goes into a
@@ -60,93 +62,28 @@ export const AUDIT = (() => {
   });
 })();
 
-/** Both sides as the browser receives them: JSON. (Sandbox objects also carry the sandbox's own prototypes.) */
-export const json = (value) => JSON.parse(JSON.stringify(value));
-export const withoutKeys = (rows, ...keys) =>
-  rows.map((row) => Object.fromEntries(Object.entries(row).filter(([k]) => !keys.includes(k))));
-
-/**
- * A certificate-queue reply, ready to compare. Row IDs differ by design. And
- * for a waiting certificate that is not held, Code.gs computes `held` as
- * undefined (an `&&` over two missing lookups), so the key vanishes from its
- * JSON; the new backend sends false. The screen reads both as "not held".
- */
-export const comparableQueue = (queue) => ({
-  ...queue,
-  entries: withoutKeys(queue.entries, "row").map((entry) => ({ ...entry, held: Boolean(entry.held) })),
-});
-
-/**
- * Phase 1b serves the survey as sections; Code.gs serves question1…15 (to
- * participants) or a list of 15 (to the editor). Both flattened to the same
- * list of {text, type}, so the questions themselves can still be compared.
- */
-export const flatQuestions = (reply) => {
-  if (Array.isArray(reply)) return reply.map(({ text, type }) => ({ text, type }));
-  if (reply?.sections) return reply.sections.flatMap((s) => s.questions.map(({ text, type }) => ({ text, type })));
-  return Array.from({ length: 15 }, (_, i) => ({ text: reply[`question${i + 1}`], type: reply[`type${i + 1}`] }));
-};
-
-/** Phase 1b adds which question an answer or a score belongs to; Code.gs has positions only. */
-const NEW_QUESTION_KEYS = ["questionId", "question", "text", "section", "retired"];
-export const withoutQuestionDetail = (rows) => withoutKeys(rows, ...NEW_QUESTION_KEYS);
-export const comparableResponses = (entries) =>
-  withoutKeys(entries, "row").map((entry) => ({ ...entry, answers: withoutQuestionDetail(entry.answers) }));
-export const comparableAnalytics = (analytics) =>
-  analytics.questions ? { ...analytics, questions: withoutQuestionDetail(analytics.questions) } : analytics;
-
 // --- Apps Script side: Code.gs over a stand-in spreadsheet --------------------
 
-function sheet(rows) {
-  const width = () => Math.max(...rows.map((r) => r.length));
-  return {
-    rows,
-    getLastRow: () => rows.length,
-    getLastColumn: width,
-    getMaxColumns: () => Math.max(26, width()),
-    getMaxRows: () => 1000,
-    appendRow: (values) => rows.push([...values]),
-    deleteRow: (index) => rows.splice(index - 1, 1),
-    insertColumnsAfter: () => {},
-    setFrozenRows: () => {},
-    autoResizeColumns: () => {},
-    getRange: (r, c, nr = 1, nc = 1) => ({
-      getValues: () => rows.slice(r - 1, r - 1 + nr).map((row) => Array.from({ length: nc }, (_, j) => row[c - 1 + j] ?? "")),
-      // The audit sheet holds only text, so what it displays is what it holds.
-      getDisplayValues() { return this.getValues().map((row) => row.map(String)); },
-      getValue: () => rows[r - 1]?.[c - 1] ?? "",
-      setValue(value) { while (rows.length < r) rows.push([]); rows[r - 1][c - 1] = value; return this; },
-      setValues(values) {
-        values.forEach((line, i) => line.forEach((value, j) => {
-          while (rows.length < r + i) rows.push([]);
-          rows[r - 1 + i][c - 1 + j] = value;
-        }));
-        return this;
-      },
-      getNumberFormat: () => "@",
-      setNumberFormat() { return this; },
-      setFontWeight() { return this; },
-      setBackground() { return this; },
-      setFontColor() { return this; },
-      createTextFinder: (text) => ({
-        matchEntireCell() { return this; },
-        matchCase() { return this; },
-        findNext: () => {
-          for (let i = r - 1; i < r - 1 + nr; i++)
-            if (String(rows[i]?.[c - 1] ?? "").toUpperCase() === String(text).toUpperCase()) return { getRow: () => i + 1 };
-          return null;
-        },
-      }),
-    }),
-  };
-}
-
 export function appsScript() {
-  const context = {};
-  vm.createContext(context);
-  // Dates must come from the sandbox's own Date: Code.gs checks
-  // `value instanceof Date`, which fails for a Date made in another realm.
-  const SandboxDate = vm.runInContext("Date", context);
+  const properties = new Map([
+    ["CERTIFICATE_QUEUE_TRIGGER_READY", "1"],
+    ["AUDIT_HASH_SECRET", AUDIT_SECRET],
+    ["AUDIT_HEAD_HASH", AUDIT.at(-1).entry_hash],
+    ["PASSWORD_PEPPER", "pepper"],
+    ["SUBMIT_SHARED_TOKEN_HASH", sha256Base64(PROXY_TOKEN)],
+    ["WORKER_TOKEN", WORKER_TOKEN],
+  ]);
+  // Drive: a folder that records what it is given.
+  const drive = [];
+  const DriveApp = { getFolderById: () => ({
+    getName: () => "Certificate templates",
+    createFile: (blob) => {
+      drive.push(blob);
+      const id = `drive-${drive.length}`;
+      return { getId: () => id, getName: () => blob.name, getUrl: () => `https://drive.google.com/file/d/${id}/view` };
+    },
+  }) };
+  const { gas: context, sheets, SandboxDate } = codeGs({ properties, services: { DriveApp } });
   const manila = (day, time = "00:00") => new SandboxDate(`${day}T${time}:00+08:00`);
   const activityHeader = ["Title", "Venue", "FromDate", "ToDate", "Certificate Template", "Focal-in-Charge", "Timestamp",
     "Given Date", "ActivityID", "Region", "Signatory Designation", "E-Signature", "Created By", "Active"];
@@ -172,59 +109,8 @@ export function appsScript() {
   const auditColumns = ["timestamp", "audit_id", "actor_email", "actor_role", "action", "target_type", "target_id", "outcome",
     "details", "request_id", "previous_hash", "entry_hash"];
   const audit = sheet([auditColumns, ...AUDIT.map((e) => auditColumns.map((k) => (k === "timestamp" ? e.logged_at : e[k])))]);
-  const sheets = { Activity: activity, Responses: responses, Questions: questions, Users: users, Whitelist: whitelist, Audit: audit };
+  Object.assign(sheets, { Activity: activity, Responses: responses, Questions: questions, Users: users, Whitelist: whitelist, Audit: audit });
 
-  const format = (date, _tz, pattern) => {
-    const p = Object.fromEntries(new Intl.DateTimeFormat("en-CA", { timeZone: "Asia/Manila", year: "numeric", month: "2-digit",
-      day: "2-digit", hour: "2-digit", minute: "2-digit", second: "2-digit", hourCycle: "h23" }).formatToParts(date).map((x) => [x.type, x.value]));
-    return pattern.replace("yyyy", p.year).replace("MM", p.month).replace("dd", p.day).replace("HH", p.hour).replace("mm", p.minute).replace("ss", p.second);
-  };
-  // Utilities as Google documents it: UTF-8 input, signed bytes out, and
-  // web-safe base64 that keeps its '=' padding.
-  const signed = (buffer) => [...buffer].map((b) => (b > 127 ? b - 256 : b));
-  const cache = new Map();
-  const drive = [];
-  const properties = new Map([
-    ["CERTIFICATE_QUEUE_TRIGGER_READY", "1"],
-    ["AUDIT_HASH_SECRET", AUDIT_SECRET],
-    ["AUDIT_HEAD_HASH", AUDIT.at(-1).entry_hash],
-    ["PASSWORD_PEPPER", "pepper"],
-    ["SUBMIT_SHARED_TOKEN_HASH", sha256Base64(PROXY_TOKEN)],
-    ["WORKER_TOKEN", WORKER_TOKEN],
-  ]);
-  const lock = () => ({ tryLock: () => true, waitLock: () => {}, releaseLock: () => {} });
-  Object.assign(context, {
-    SpreadsheetApp: { getActiveSpreadsheet: () => ({ getSheetByName: (n) => sheets[n] || null }), flush: () => {} },
-    Session: { getScriptTimeZone: () => "Asia/Manila", getActiveUser: () => ({ getEmail: () => "" }) },
-    Utilities: {
-      formatDate: format,
-      getUuid: () => randomUUID(),
-      DigestAlgorithm: { SHA_256: "sha256" },
-      Charset: { UTF_8: "utf8" },
-      computeDigest: (_alg, value) => signed(createHash("sha256").update(String(value), "utf8").digest()),
-      computeHmacSha256Signature: (value, key) => signed(createHmac("sha256", String(key)).update(String(value), "utf8").digest()),
-      base64EncodeWebSafe: (bytes) => Buffer.from(bytes.map((b) => b & 255)).toString("base64").replace(/\+/g, "-").replace(/\//g, "_"),
-      base64Decode: (text) => signed(Buffer.from(text, "base64")),
-      newBlob: (bytes, mimeType, name) => ({ bytes, mimeType, name }),
-    },
-    // Drive: a folder that records what it is given.
-    DriveApp: { getFolderById: () => ({
-      getName: () => "Certificate templates",
-      createFile: (blob) => {
-        drive.push(blob);
-        const id = `drive-${drive.length}`;
-        return { getId: () => id, getName: () => blob.name, getUrl: () => `https://drive.google.com/file/d/${id}/view` };
-      },
-    }) },
-    ContentService: { MimeType: { JSON: "json" }, createTextOutput: (text) => ({ setMimeType() { return this; }, getContent: () => text }) },
-    CacheService: { getScriptCache: () => ({
-      get: (k) => cache.get(k) ?? null, put: (k, v) => cache.set(k, v), remove: (k) => cache.delete(k),
-      removeAll: (keys) => keys.forEach((k) => cache.delete(k)),
-    }) },
-    PropertiesService: { getScriptProperties: () => ({ getProperty: (k) => properties.get(k) ?? null, setProperty: (k, v) => properties.set(k, String(v)) }) },
-    LockService: { getScriptLock: lock, getDocumentLock: lock },
-  });
-  vm.runInContext(readFileSync(new URL("../../google-apps-script/Code.gs", import.meta.url), "utf8"), context);
   // A fixed "today" and a chosen signed-in admin: these tests compare what the
   // actions do, not the clock or sign-in, which have their own tests.
   let actor = ADMINS.helper;

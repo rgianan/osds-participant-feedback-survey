@@ -44,5 +44,15 @@ export const handler = async (event) => {
     db,
     now: new Date(),
     portalBaseUrl: String(process.env.PORTAL_BASE_URL || process.env.URL || "").trim(),
+    setup: setupReport(),
   }));
 };
+
+/** For workerPing: how this site is configured. Whether each setting is present, never its value. */
+const SETTINGS = ["PORTAL_BASE_URL", "PASSWORD_PEPPER", "AUDIT_HASH_SECRET", "GAS_WEB_APP_URL", "SUBMIT_SHARED_TOKEN", "TURNSTILE_SECRET_KEY"];
+const setting = (name) => String(process.env[name] || "").trim();
+const setupReport = () => ({
+  backend: setting("BACKEND").toLowerCase() === "supabase" ? "supabase" : "apps-script",
+  maintenance: ["on", "true", "1", "yes"].includes(setting("MAINTENANCE_MODE").toLowerCase()),
+  settings: Object.fromEntries(SETTINGS.map((name) => [name, Boolean(setting(name))])),
+});

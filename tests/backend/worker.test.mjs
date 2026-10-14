@@ -152,3 +152,9 @@ test("without PORTAL_BASE_URL no job is claimed, since certificates would have n
   assert.match(reply.error, /PORTAL_BASE_URL/);
   assert.equal((await db.query(`select certificate_status::text as s from portal.responses`))[0].s, "pending");
 });
+
+test("the rollback export refuses a database the import never filled", async () => {
+  const { db } = await freshDatabase();
+  const reply = await handleWorkerRequest({ action: "workerReplayExport", afterAuditHash: "" }, { db, now: NOW, portalBaseUrl: PORTAL });
+  assert.deepEqual(reply, { ok: false, error: "This database was not filled by the import (scripts/import-sheets.mjs), so there is nothing to replay." });
+});

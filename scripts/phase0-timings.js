@@ -21,6 +21,11 @@
  * because only issued certificates are cached. To time the cache, put the
  * verification code of a real issued certificate in VERIFY_CODE below; it adds
  * a "verifyIssuedCertificate" row.
+ *
+ * Phase 4 (the rehearsal) runs the same file on the staging site, which
+ * answers from the new backend; there "appsScriptStartup" is the new backend
+ * answering an unknown action. The last line says whether every request met
+ * the migration's target: a median under half a second.
  */
 (async () => {
   const VERIFY_CODE = ""; // e.g. "CHED-0123456789ABCDEF0123"
@@ -97,12 +102,19 @@
   }
 
   console.table(results);
+  const TARGET_MS = 500;
+  const slow = results.filter((r) => !["netlifyOnly", "appsScriptStartup"].includes(r.request) && r.medianMs >= TARGET_MS);
+  const target = slow.length
+    ? `Not met: ${slow.map((r) => `${r.request} ${r.medianMs} ms`).join(", ")}`
+    : `Met: every request's median is under ${TARGET_MS} ms`;
+  console.log(`Target (median under ${TARGET_MS} ms for every request): ${target}`);
   const report = {
     measuredAt: new Date().toISOString(),
     page: location.origin,
     runsPerRequest: RUNS,
     signedIn: Boolean(token),
     results,
+    target,
   };
   try {
     copy(JSON.stringify(report, null, 2));

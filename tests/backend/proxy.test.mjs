@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { handler } from "../../netlify/functions/gas-proxy.mjs";
+import { MAINTENANCE_MESSAGE, handler } from "../../netlify/functions/gas-proxy.mjs";
 
 const GAS_URL = "https://script.google.com/macros/s/TEST/exec";
 const request = (body) => ({
@@ -57,6 +57,42 @@ test("BACKEND=supabase answers from the new backend and never calls Apps Script"
         error: "The database is not configured. Set SUPABASE_DB_URL in Netlify.",
       });
       assert.equal(fetched, false);
+    } finally {
+      globalThis.fetch = realFetch;
+    }
+  }));
+
+test("maintenance mode turns away every change, submissions and sign-ins included, and lets reads through", () =>
+  withEnv({ ...baseEnv, BACKEND: "", MAINTENANCE_MODE: "on", TURNSTILE_SECRET_KEY: "secret" }, async () => {
+    const sent = [];
+    const realFetch = globalThis.fetch;
+    globalThis.fetch = async (url, init) => {
+      sent.push({ url, action: JSON.parse(init.body).action });
+      return new Response(JSON.stringify({ ok: true, data: { valid: true } }), { status: 200 });
+    };
+    try {
+      for (const action of ["submitFeedback", "adminLogin", "adminSaveActivity", "adminRetryCertificates", "adminSaveUser", "somethingNew"]) {
+        const reply = await handler(request({ action, turnstileToken: "token" }));
+        assert.equal(reply.statusCode, 503, action);
+        assert.deepEqual(JSON.parse(reply.body), { ok: false, error: MAINTENANCE_MESSAGE, maintenance: true });
+      }
+      assert.deepEqual(sent, [], "neither Turnstile nor Apps Script is called for them");
+      for (const action of ["verifyCertificate", "getActivityData", "adminGetResponses", "adminGetAuditLog"])
+        assert.equal((await handler(request({ action }))).statusCode, 200, action);
+      assert.deepEqual(sent.map((s) => s.action), ["verifyCertificate", "getActivityData", "adminGetResponses", "adminGetAuditLog"]);
+      // The browser retries only messages that read as momentary (src/lib/api.js); this one must not be retried.
+      assert.ok(!/lock|busy|simultaneous|too many|network|fetch|temporar|timeout/i.test(MAINTENANCE_MESSAGE));
+    } finally {
+      globalThis.fetch = realFetch;
+    }
+  }));
+
+test("maintenance is off unless switched on", () =>
+  withEnv({ ...baseEnv, BACKEND: "", MAINTENANCE_MODE: "off" }, async () => {
+    const realFetch = globalThis.fetch;
+    globalThis.fetch = async () => new Response(JSON.stringify({ ok: true, data: [] }), { status: 200 });
+    try {
+      assert.equal((await handler(request({ action: "adminSaveActivity" }))).statusCode, 200);
     } finally {
       globalThis.fetch = realFetch;
     }

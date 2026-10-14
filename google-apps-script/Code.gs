@@ -3013,6 +3013,258 @@ function phase0Baseline() {
 }
 
 /**
+ * Phase 3 of the Supabase migration. Run from the editor: it writes every
+ * sheet the portal uses into one JSON file in your own Drive, shared with no
+ * one, for scripts/import-sheets.mjs to load into the new database.
+ *
+ * The file holds participants' details and administrators' password hashes.
+ * Download it, run the import, then delete it from Drive (and empty the
+ * trash) and from your computer.
+ *
+ * Cells keep their types: a date becomes {"$date": "<ISO time>"}. The Audit
+ * sheet is written as displayed, because that is the text its hashes are
+ * checked against. No secret leaves Script Properties: PASSWORD_PEPPER and
+ * AUDIT_HASH_SECRET are copied into Netlify by hand.
+ */
+function exportForMigration() {
+  assertEditorContext_('exportForMigration');
+  var ss = SpreadsheetApp.getActiveSpreadsheet(), props = PropertiesService.getScriptProperties();
+  var timeZone = Session.getScriptTimeZone() || 'Asia/Manila';
+  function typed(value) {
+    return Object.prototype.toString.call(value) === '[object Date]' ? { $date: isNaN(value) ? '' : value.toISOString() } : value;
+  }
+  function cells(sheet, asDisplayed) {
+    if (!sheet || sheet.getLastRow() < 1 || sheet.getLastColumn() < 1) return [];
+    var range = sheet.getRange(1, 1, sheet.getLastRow(), sheet.getLastColumn());
+    return asDisplayed ? range.getDisplayValues() : range.getValues().map(function(row){ return row.map(typed); });
+  }
+  // Submissions and admin saves take the document lock, so the sheets are
+  // read in one consistent moment.
+  var lock = LockService.getDocumentLock();
+  if (!lock.tryLock(30000)) throw new Error('The spreadsheet is busy. Try again in a moment.');
+  var out, sheets = {};
+  try {
+    out = {
+      format: 'participant-feedback-export',
+      version: 1,
+      exportedAt: new Date().toISOString(),
+      timeZone: timeZone,
+      properties: { AUDIT_HEAD_HASH: props.getProperty('AUDIT_HEAD_HASH') || '' },
+      sheets: sheets
+    };
+    ['Activity','Responses','Questions','Users','Whitelist','Audit'].forEach(function(name){
+      var sheet = ss.getSheetByName(name);
+      sheets[name] = sheet ? cells(sheet, name === 'Audit') : null;
+    });
+  } finally { lock.releaseLock(); }
+
+  var fileName = 'participant-feedback-export-' + Utilities.formatDate(new Date(), timeZone, 'yyyyMMdd-HHmmss') + '.json';
+  var file = DriveApp.createFile(fileName, JSON.stringify(out), 'application/json');
+  var summary = { file: fileName, url: file.getUrl(), exportedAt: out.exportedAt, rows: {} };
+  Object.keys(sheets).forEach(function(name){ summary.rows[name] = sheets[name] ? Math.max(0, sheets[name].length - 1) : 'missing'; });
+  summary.next = 'Download the file, run: npm run import:sheets -- <file> --dry-run, then delete it from Drive and empty the trash.';
+  Logger.log(JSON.stringify(summary, null, 2));
+  return summary;
+}
+
+/**
+ * Rollback, within 24 hours of the Supabase cutover. Copies into the sheets
+ * everything done through the new backend since the import, so this portal
+ * carries on where the new one stopped:
+ *
+ *   - new responses are appended with their certificate status, link and
+ *     verification code, so certificates issued in that window still verify;
+ *   - imported responses take their current certificate status;
+ *   - audit entries are appended, continuing the chain, and its head moves;
+ *   - activities created or changed are written back, as are administrators'
+ *     name, role and active switch, and the questions' wording while the
+ *     survey still has its 15 questions in their order.
+ *
+ * What the sheets cannot hold is listed under notCopied instead: an
+ * administrator added after cutover (their password is in a format this
+ * script cannot check), a survey that changed shape, a deleted activity.
+ *
+ * Run previewReplayFromNewBackend() first: the same report, nothing written.
+ * Before either, put Netlify in maintenance (MAINTENANCE_MODE=on) and delete
+ * the processCertificateQueue trigger, so nothing changes while this copies.
+ * Needs WORKER_API_URL and WORKER_TOKEN, as the API certificate queue does.
+ */
+function previewReplayFromNewBackend() {
+  assertEditorContext_('previewReplayFromNewBackend');
+  return replayFromNewBackend_(false);
+}
+
+function replayFromNewBackend() {
+  assertEditorContext_('replayFromNewBackend');
+  return replayFromNewBackend_(true);
+}
+
+function replayFromNewBackend_(write) {
+  var ss = SpreadsheetApp.getActiveSpreadsheet(), props = PropertiesService.getScriptProperties();
+  var summary = { mode: write ? 'REPLAYED' : 'PREVIEW: nothing has been changed', importedAt: '', responsesAdded: 0, responsesUpdated: 0,
+    auditEntriesAdded: 0, activitiesAdded: 0, activitiesUpdated: 0, administratorsUpdated: 0, questionsUpdated: 0, notCopied: [] };
+  var scriptLock = LockService.getScriptLock();
+  if (!scriptLock.tryLock(30000)) throw new Error('A certificate run is in progress. Let it finish, delete the processCertificateQueue trigger, then run this again.');
+  try {
+    var docLock = LockService.getDocumentLock();
+    if (!docLock.tryLock(30000)) throw new Error('The spreadsheet is busy. Try again in a moment.');
+    try {
+      var auditSheet = ensureAuditSheet_(), auditHdr = getHeaderMap_(auditSheet), cHash = idxOf_(auditHdr, ['entry_hash']);
+      var sheetHead = auditSheet.getLastRow() >= 2 && cHash >= 0 ? safeTrim_(auditSheet.getRange(auditSheet.getLastRow(), cHash + 1).getDisplayValues()[0][0]) : '';
+      var data = workerApi_('workerReplayExport', { afterAuditHash: sheetHead });
+      summary.importedAt = data.importedAt;
+      var cellWrites = []; // [sheet, row, 0-based column, value]
+      function rowsOf(sheet) { return sheet && sheet.getLastRow() >= 2 ? sheet.getRange(2, 1, sheet.getLastRow() - 1, sheet.getLastColumn()).getValues() : []; }
+
+      // --- Responses
+      var rSheet = ss.getSheetByName('Responses');
+      if (!rSheet) throw new Error("Sheet 'Responses' not found.");
+      var rHdr = getHeaderMap_(rSheet), rc = responseColumns_(rHdr), rWidth = rSheet.getLastColumn(), rRows = rowsOf(rSheet);
+      var cVerifyUrl = idxOf_(rHdr, ['verification url', 'verify url']), answerCols = [];
+      for (var q = 1; q <= 15; q++) answerCols.push(idxOf_(rHdr, ['answer' + q, 'q' + q, 'question' + q]));
+      var newResponses = [], otherAnswers = 0, sheetRowByCode = {};
+      rRows.forEach(function(row, i){ var code = safeTrim_(row[rc.verificationCode]).toUpperCase(); if (code) sheetRowByCode[code] = i + 2; });
+      data.responses.forEach(function(r){
+        // Imported rows are found by their row; ones made since, by their code
+        // (so running this twice adds nothing twice).
+        var at = r.sheetRow || sheetRowByCode[r.verificationCode];
+        if (at) {
+          var row = rRows[at - 2], code = row ? safeTrim_(row[rc.verificationCode]).toUpperCase() : '';
+          if (!row || (code && code !== r.verificationCode)) {
+            summary.notCopied.push('Responses row ' + at + ' no longer holds the response imported from it, so its certificate status was not copied.');
+            return;
+          }
+          if (code && safeTrim_(row[rc.status]) === r.cStatus && safeTrim_(row[rc.certificate]) === r.certificateUrl) return;
+          [[rc.status, r.cStatus], [rc.certificate, r.certificateUrl], [rc.emailSent, r.emailSent], [rc.verificationCode, r.verificationCode],
+           [cVerifyUrl, r.verificationUrl || (row[cVerifyUrl] || '')]].forEach(function(w){ if (w[0] >= 0) cellWrites.push([rSheet, at, w[0], w[1]]); });
+          summary.responsesUpdated++;
+          return;
+        }
+        var line = new Array(rWidth).fill('');
+        function put(col, value) { if (col >= 0) line[col] = safeSheetValue_(value); }
+        put(rc.timestamp, new Date(r.submittedAt)); put(rc.name, r.name); put(rc.email, r.email); put(rc.sex, r.sex); put(rc.age, r.age);
+        put(rc.activityId, r.activityId); put(rc.title, r.title); put(rc.venue, r.venue); put(rc.activityDate, r.activityDate);
+        r.answers.forEach(function(value, i){ put(answerCols[i], value); });
+        put(rc.takeaways, r.takeaways); put(rc.suggestions, r.suggestions); put(rc.emailSent, r.emailSent);
+        put(rc.certificate, r.certificateUrl); put(rc.verificationCode, r.verificationCode); put(cVerifyUrl, r.verificationUrl); put(rc.status, r.cStatus);
+        newResponses.push(line);
+        otherAnswers += r.otherAnswers || 0;
+      });
+      summary.responsesAdded = newResponses.length;
+      if (otherAnswers) summary.notCopied.push(otherAnswers + ' answer(s) to questions added after cutover: the sheet has no column for them.');
+
+      // --- Audit log: the entries after the sheet's last one, so the chain runs on.
+      var auditLines = data.auditEntries.map(function(e){
+        var line = new Array(auditSheet.getLastColumn()).fill('');
+        Object.keys(e).forEach(function(key){
+          var col = key === 'logged_at' ? auditHdr.timestamp : auditHdr[key];
+          if (col !== undefined) line[col] = safeSheetValue_(e[key]);
+        });
+        return line;
+      });
+      summary.auditEntriesAdded = auditLines.length;
+
+      // --- Activities created or changed in the new portal
+      var aSheet = ss.getSheetByName('Activity');
+      if (!aSheet) throw new Error("Sheet 'Activity' not found.");
+      var aHdr = getHeaderMap_(aSheet), aRows = rowsOf(aSheet), aWidth = aSheet.getLastColumn();
+      var aCol = function(names){ return idxOf_(aHdr, names); }, cCode = aCol(['activityid','activity id','id']), activityRowByCode = {};
+      aRows.forEach(function(row, i){ var code = safeTrim_(row[cCode]).toLowerCase(); if (code) activityRowByCode[code] = i + 2; });
+      var liveCodes = {}, newActivities = [];
+      data.activities.forEach(function(a){
+        liveCodes[a.activityId.toLowerCase()] = true;
+        var at = activityRowByCode[a.activityId.toLowerCase()];
+        // [aliases, value, how the sheet's cell reads as the same value]
+        var text = function(v){ return safeTrim_(v); }, day = function(v){ return fmtDate_(v); };
+        var fields = [[['title','activity title','activity'], a.title, text], [['venue','location'], a.venue, text], [['fromdate','from date','start'], a.fromDate, day],
+          [['todate','to date','end'], a.toDate, day], [['certificate template','template'], a.template, text], [['focal-in-charge','focal in charge','in-charge','in charge'], a.inCharge, text],
+          [['timestamp','created at','last updated'], new Date(a.updatedAt), null], [['given date','date given','givendate','issued','schedule'], a.givenDate, day],
+          [['activityid','activity id','id'], a.activityId, text], [['region','ched region'], a.region, text], [['signatory designation','designation'], a.signatoryDesignation, text],
+          [['e-signature','signature','signature image'], a.signature, text], [['created by','createdby','owner','creator'], a.createdBy, function(v){ return safeTrim_(v).toLowerCase(); }],
+          [['active','enabled','status'], a.active ? 'TRUE' : 'FALSE', function(v){ return isActiveCellEnabled_(v) ? 'TRUE' : 'FALSE'; }]];
+        if (at) {
+          // Only an activity whose cells now read differently is rewritten.
+          var row = aRows[at - 2];
+          var differs = fields.some(function(f){ var col = aCol(f[0]); return f[2] && col >= 0 && f[2](row[col]) !== f[1]; });
+          if (!differs) return;
+          fields.forEach(function(f){ var col = aCol(f[0]); if (col >= 0) cellWrites.push([aSheet, at, col, safeSheetValue_(f[1])]); });
+          summary.activitiesUpdated++;
+        } else {
+          var line = new Array(aWidth).fill('');
+          fields.forEach(function(f){ var col = aCol(f[0]); if (col >= 0) line[col] = safeSheetValue_(f[1]); });
+          newActivities.push(line);
+        }
+      });
+      summary.activitiesAdded = newActivities.length;
+      Object.keys(activityRowByCode).forEach(function(code){
+        if (!liveCodes[code]) summary.notCopied.push('Activity row ' + activityRowByCode[code] + ' was deleted in the new portal. Delete it in the Activity sheet by hand if it should go.');
+      });
+
+      // --- Administrators: name, role and active, in both sheets
+      var uSheet = ss.getSheetByName('Users'), wSheet = ensureWhitelistSheet_();
+      var uHdr = uSheet ? getHeaderMap_(uSheet) : {}, wHdr = getHeaderMap_(wSheet);
+      data.users.forEach(function(u){
+        var uRow = uSheet ? findRowByEmail_(uSheet, u.email) : 0, wRow = findRowByEmail_(wSheet, u.email);
+        if (!uRow || !wRow) {
+          if (u.isNew) summary.notCopied.push('Administrator ' + u.email + ' was added in the new portal. Add them again here; their password cannot be copied.');
+          return;
+        }
+        var current = uSheet.getRange(uRow, 1, 1, uSheet.getLastColumn()).getValues()[0], changed = false;
+        [['name', u.name], ['role', u.role]].forEach(function(f){ var col = idxOf_(uHdr, [f[0]]); if (col >= 0 && safeTrim_(current[col]) !== f[1]) changed = true; });
+        var cActive = idxOf_(uHdr, ['active']);
+        if (cActive >= 0 && (String(current[cActive]).toLowerCase() !== 'false') !== u.active) changed = true;
+        if (!changed) return;
+        [['name', u.name], ['role', u.role], ['active', u.active]].forEach(function(f){
+          var uc = idxOf_(uHdr, [f[0]]), wc = idxOf_(wHdr, [f[0]]);
+          if (uc >= 0) cellWrites.push([uSheet, uRow, uc, safeSheetValue_(f[1])]);
+          if (wc >= 0) cellWrites.push([wSheet, wRow, wc, safeSheetValue_(f[1])]);
+        });
+        var wUpdated = idxOf_(wHdr, ['updated_at']);
+        if (wUpdated >= 0) cellWrites.push([wSheet, wRow, wUpdated, new Date()]);
+        summary.administratorsUpdated++;
+      });
+
+      // --- Question wording, while the survey is still the sheet's 15 in order
+      var qSheet = ss.getSheetByName('Questions'), qHdr = qSheet ? getHeaderMap_(qSheet) : {};
+      if (!qSheet || qSheet.getLastRow() < 2) {
+        summary.notCopied.push('The Questions sheet is missing its row of questions, so their wording was not copied.');
+      } else if (!data.survey.sameQuestions) {
+        summary.notCopied.push('The survey was changed in the new portal (questions added, removed or moved). This portal keeps the 15 questions it had at cutover.');
+      } else {
+        var qRow = qSheet.getRange(2, 1, 1, qSheet.getLastColumn()).getValues()[0];
+        data.survey.questions.forEach(function(question, i){
+          var tc = idxOf_(qHdr, ['question' + (i + 1)]), yc = idxOf_(qHdr, ['type' + (i + 1)]);
+          if (tc < 0) return;
+          if (safeTrim_(qRow[tc]) === question.text && normalizeQuestionType_(yc >= 0 ? qRow[yc] : '') === question.type) return;
+          cellWrites.push([qSheet, 2, tc, safeSheetValue_(question.text)]);
+          if (yc >= 0) cellWrites.push([qSheet, 2, yc, question.type]);
+          summary.questionsUpdated++;
+        });
+      }
+
+      if (write) {
+        if (newResponses.length) rSheet.getRange(rSheet.getLastRow() + 1, 1, newResponses.length, rWidth).setValues(newResponses);
+        if (auditLines.length) {
+          auditSheet.getRange(auditSheet.getLastRow() + 1, 1, auditLines.length, auditLines[0].length).setValues(auditLines);
+          props.setProperty('AUDIT_HEAD_HASH', data.auditEntries[data.auditEntries.length - 1].entry_hash);
+        }
+        if (newActivities.length) aSheet.getRange(aSheet.getLastRow() + 1, 1, newActivities.length, aWidth).setValues(newActivities);
+        cellWrites.forEach(function(w){ w[0].getRange(w[1], w[2] + 1).setValue(w[3]); });
+        SpreadsheetApp.flush();
+        invalidatePublicCache_();
+        props.setProperty('VERIFY_CACHE_GENERATION', String(Date.now()));
+      }
+    } finally { docLock.releaseLock(); }
+  } finally { scriptLock.releaseLock(); }
+  if (write) summary.auditChain = auditChainDiagnose().verdict;
+  summary.next = write
+    ? 'Remove Script Property CERTIFICATE_SOURCE, run setupCertificateQueueTrigger(), then switch Netlify back (BACKEND unset) and lift maintenance.'
+    : 'If this is what you expect, run replayFromNewBackend().';
+  Logger.log(JSON.stringify(summary, null, 2));
+  return summary;
+}
+
+/**
  * Certificate email. Built with tables and inline styles because Gmail,
  * Outlook and most mobile clients strip <style> blocks and ignore flexbox.
  * Every interpolated value is escaped: the participant's name and the activity

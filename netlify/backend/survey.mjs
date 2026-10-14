@@ -19,7 +19,7 @@ import { requireSuperadmin } from "./users.mjs";
  *     starts a new one, since "4" from a rating would mean nothing as yes/no.
  */
 
-const DEFAULT_SECTIONS = ["Program content", "Event experience", "Overall reflection"];
+export const DEFAULT_SECTIONS = ["Program content", "Event experience", "Overall reflection"];
 const OUT_OF_DATE = "The questions changed since this page loaded. Reload and try again.";
 const trim = (value) => String(value ?? "").trim();
 

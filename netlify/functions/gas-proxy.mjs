@@ -1,5 +1,23 @@
 import { createHash } from "node:crypto";
 
+/**
+ * Maintenance mode for the Supabase cutover and a rollback: with
+ * MAINTENANCE_MODE=on, only reads go through, so nothing changes in Sheets
+ * between the final export and the switch. Certificate verification keeps
+ * working. Everything else, submissions and sign-ins included, gets the
+ * message below; the survey keeps the participant's answers on the page.
+ * (Worded so the browser does not retry it automatically: see api.js.)
+ */
+const READ_ONLY_ACTIONS = new Set([
+  "getActivityData", "getQuestions", "verifyCertificate", "adminValidateSession", "adminGetActivities",
+  "adminGetResponses", "adminGetCertificateQueue", "adminGetFeedbackAnalytics", "adminGetDashboard",
+  "adminGetUsers", "adminGetQuestions", "adminGetAuditLog",
+]);
+export const MAINTENANCE_MESSAGE =
+  "The portal is being upgraded and will be back shortly. Please try again in a few minutes.";
+const inMaintenance = () =>
+  ["on", "true", "1", "yes"].includes(String(process.env.MAINTENANCE_MODE || "").trim().toLowerCase());
+
 const json = (statusCode, payload) => ({
   statusCode,
   headers: {
@@ -42,6 +60,8 @@ export const handler = async (event, context = {}) => {
     const payload = JSON.parse(body);
     if (!payload || typeof payload !== "object" || Array.isArray(payload))
       return json(400, { ok: false, error: "Invalid JSON request." });
+    if (inMaintenance() && !READ_ONLY_ACTIONS.has(payload.action))
+      return json(503, { ok: false, error: MAINTENANCE_MESSAGE, maintenance: true });
     const portalBaseUrl = String(
       process.env.PORTAL_BASE_URL || process.env.URL || "",
     ).trim();

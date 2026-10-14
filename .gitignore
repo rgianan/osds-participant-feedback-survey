@@ -5,3 +5,6 @@ dist/
 
 # Local Netlify folder
 .netlify
+
+# Sheets exports for the Supabase import: participant details and password hashes
+participant-feedback-export-*.json

@@ -87,7 +87,7 @@ export function auditTimestamp(date) {
 }
 
 /** Code.gs normalizeAuditTimestamp_: restores zero-padding that Sheets dropped. */
-function normalizeTimestamp(value) {
+export function normalizeAuditTimestamp(value) {
   const raw = trim(value);
   const m = raw.match(/^(\d{4})-(\d{1,2})-(\d{1,2})[ T](\d{1,2}):(\d{1,2}):(\d{1,2})/);
   if (!m) return raw;
@@ -98,7 +98,7 @@ function normalizeTimestamp(value) {
 /** Code.gs auditCanonical_: the exact string an entry's HMAC covers. */
 export function auditCanonical(entry) {
   return [
-    normalizeTimestamp(entry.logged_at), entry.audit_id, entry.actor_email, entry.actor_role, entry.action,
+    normalizeAuditTimestamp(entry.logged_at), entry.audit_id, entry.actor_email, entry.actor_role, entry.action,
     entry.target_type, entry.target_id, entry.outcome, entry.details, entry.request_id, entry.previous_hash,
   ].map(trim).join("|");
 }
@@ -145,32 +145,49 @@ export async function appendAudit(db, { secret, now, action, body, success, erro
 }
 
 /**
- * The Audit screen (superadmins only): newest first, filtered, and with the
- * whole chain re-verified on every read, as Code.gs adminGetAuditLog. Each
- * entry must hash to itself and link to the one before, and the last must be
- * the head recorded in settings: a deleted latest entry breaks that.
+ * Re-verifies the whole chain, oldest entry first. Each entry must hash to
+ * itself and link to the one before, and the last must be the head recorded
+ * in settings: a deleted latest entry breaks that. `firstBroken` is the
+ * 1-based position of the first entry that fails, 0 when none does.
  */
-export async function adminGetAuditLog(body, context) {
-  await requireSuperadmin(context, body?.adminToken);
-  const filters = body?.filters || {};
-  const [head] = await context.db.query(`select value from portal.settings where key = 'audit_head_hash'`);
-  const expectedHead = head?.value || "";
-  const rows = await context.db.query(
+export function checkAuditChain(rows, expectedHead, secret) {
+  let hashFailures = 0;
+  let linkFailures = 0;
+  let firstBroken = 0;
+  let previous = null;
+  rows.forEach((entry, i) => {
+    const hashOk = !!secret && constantTimeEquals(hmacBase64(auditCanonical(entry), secret), entry.entry_hash);
+    const linkOk = previous === null || entry.previous_hash === previous;
+    if (!hashOk) hashFailures++;
+    if (!linkOk) linkFailures++;
+    if ((!hashOk || !linkOk) && !firstBroken) firstBroken = i + 1;
+    previous = entry.entry_hash;
+  });
+  const headMatches = rows.length ? !expectedHead || previous === expectedHead : !expectedHead;
+  return { valid: !hashFailures && !linkFailures && headMatches, checkedRows: rows.length, hashFailures, linkFailures, firstBroken, headMatches };
+}
+
+/** Every entry, oldest first, and the head the chain must end at. */
+export async function readAuditChain(db) {
+  const [head] = await db.query(`select value from portal.settings where key = 'audit_head_hash'`);
+  const rows = await db.query(
     `select logged_at, audit_id, actor_email, actor_role, action, target_type, target_id, outcome, details,
             request_id, previous_hash, entry_hash
        from portal.audit_log order by id`,
   );
-  if (!rows.length) return { entries: [], integrity: { valid: !expectedHead, checkedRows: 0 } };
+  return { rows, expectedHead: head?.value || "" };
+}
 
-  const secret = context.secrets?.auditSecret;
-  let valid = true;
-  let previous = null;
-  for (const entry of rows) {
-    if (!secret || !constantTimeEquals(hmacBase64(auditCanonical(entry), secret), entry.entry_hash)) valid = false;
-    if (previous !== null && entry.previous_hash !== previous) valid = false;
-    previous = entry.entry_hash;
-  }
-  if (expectedHead && previous !== expectedHead) valid = false;
+/**
+ * The Audit screen (superadmins only): newest first, filtered, and with the
+ * whole chain re-verified on every read, as Code.gs adminGetAuditLog.
+ */
+export async function adminGetAuditLog(body, context) {
+  await requireSuperadmin(context, body?.adminToken);
+  const filters = body?.filters || {};
+  const { rows, expectedHead } = await readAuditChain(context.db);
+  if (!rows.length) return { entries: [], integrity: { valid: !expectedHead, checkedRows: 0 } };
+  const { valid } = checkAuditChain(rows, expectedHead, context.secrets?.auditSecret);
 
   const action = trim(filters.action).toUpperCase();
   const outcome = trim(filters.outcome).toUpperCase();
