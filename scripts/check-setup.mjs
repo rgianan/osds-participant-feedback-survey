@@ -17,13 +17,42 @@ import { checkApiDatabase, checkOwnerDatabase, checkSite, describeDatabaseUrl } 
 
 const args = process.argv.slice(2);
 const siteAt = args.indexOf("--site");
-const site = siteAt >= 0 ? args[siteAt + 1] : "";
+let site = siteAt >= 0 ? args[siteAt + 1] : "";
 const env = (name) => String(process.env[name] || "").trim();
-const apiUrl = env("SUPABASE_DB_URL");
-const ownerUrl = env("IMPORT_DB_URL");
+let apiUrl = env("SUPABASE_DB_URL");
+let ownerUrl = env("IMPORT_DB_URL");
+let workerToken = env("WORKER_TOKEN");
+
+/** One line from the terminal. `hidden`: what is typed or pasted is not shown, and never reaches shell history. */
+async function ask(question, hidden) {
+  const { createInterface } = await import("node:readline");
+  const { Writable } = await import("node:stream");
+  let muted = false;
+  const output = new Writable({ write(chunk, encoding, done) { if (!muted) process.stdout.write(chunk, encoding); done(); } });
+  const rl = createInterface({ input: process.stdin, output, terminal: true });
+  return new Promise((resolve) => {
+    rl.question(question, (answer) => {
+      rl.close();
+      // Nothing was shown, so say what arrived: a doubled paste shows as twice the length.
+      if (hidden) process.stdout.write(answer.trim() ? `  (received ${answer.trim().length} characters)\n` : "  (skipped)\n");
+      resolve(answer.trim());
+    });
+    muted = hidden;
+  });
+}
+
 if (!site && !apiUrl && !ownerUrl) {
-  console.log("Nothing to check. Pass --site https://<site>, and/or set SUPABASE_DB_URL, IMPORT_DB_URL, WORKER_TOKEN. See the top of scripts/check-setup.mjs.");
-  process.exit(2);
+  if (!process.stdin.isTTY) {
+    console.log("Nothing to check. Pass --site https://<site>, and/or set SUPABASE_DB_URL, IMPORT_DB_URL, WORKER_TOKEN. See the top of scripts/check-setup.mjs.");
+    process.exit(2);
+  }
+  // Run in a terminal with nothing set: ask, so no secret is typed on a command line.
+  console.log("Paste each value when asked, or press Enter to skip it. Connection strings and tokens are not shown as you paste.\n");
+  apiUrl = await ask("API connection string (SUPABASE_DB_URL): ", true);
+  ownerUrl = await ask("Owner connection string (IMPORT_DB_URL): ", true);
+  site = await ask("Site address to check, e.g. https://example.netlify.app: ", false);
+  if (site && !workerToken) workerToken = await ask("That site's worker token (WORKER_TOKEN): ", true);
+  if (!site && !apiUrl && !ownerUrl) process.exit(2);
 }
 
 const { default: postgres } = await import("postgres");
@@ -49,7 +78,7 @@ const host = (url) => describeDatabaseUrl(url)?.host || "?";
 try {
   if (apiUrl) show(`API database (SUPABASE_DB_URL, ${host(apiUrl)})`, await checkApiDatabase(apiUrl, connect(apiUrl)));
   if (ownerUrl) show(`Owner connection (IMPORT_DB_URL, ${host(ownerUrl)})`, await checkOwnerDatabase(ownerUrl, connect(ownerUrl)));
-  if (site) show(`Site ${site}`, await checkSite(site, { workerToken: env("WORKER_TOKEN") }));
+  if (site) show(`Site ${site}`, await checkSite(site, { workerToken }));
 } finally {
   await Promise.all(opened.map((sql) => sql.end({ timeout: 5 })));
 }

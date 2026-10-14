@@ -120,3 +120,20 @@ test("a site that is set up: the backend, Turnstile, and from inside, the databa
     "info BACKEND: supabase",
   ]);
 });
+
+test("a string pasted twice, or not ending in /postgres, is caught before signing in", async () => {
+  const never = async () => { throw new Error("should not connect"); };
+  assert.deepEqual(await checkApiDatabase(API_URL + API_URL, never), [{ status: "fail", label: "the string appears twice",
+    hint: "It was pasted twice, or with another string after it. Paste it once." }]);
+  assert.equal((await checkOwnerDatabase(OWNER_URL.replace(/\/postgres$/, "/postgres2"), never))[0].label, "the string does not end in /postgres");
+  // And the pooler's own wording for it, should it get that far.
+  const refused = await checkApiDatabase(API_URL, async () => ({ query: async () => { throw new Error('(EINVALIDUSERINFO) Authentication error, reason: "Invalid format for user or db_name"'); } }));
+  assert.match(refused.at(-1).hint, /must end in \/postgres with nothing after it/);
+});
+
+test("a site can be given by any of its pages", async () => {
+  const seen = [];
+  const fetch = async (url) => { seen.push(url); return new Response("<html>", { status: 404 }); };
+  await checkSite("https://ched-feedback-survey.netlify.app/admin", { fetch });
+  assert.equal(seen[0], "https://ched-feedback-survey.netlify.app/.netlify/functions/gas-proxy");
+});

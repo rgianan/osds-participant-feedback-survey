@@ -23,7 +23,10 @@ export function describeDatabaseUrl(url) {
       user: decodeURIComponent(parsed.username),
       host: parsed.hostname,
       port: Number(parsed.port || 5432),
+      database: decodeURIComponent(parsed.pathname.replace(/^\//, "")),
       singapore: /ap-southeast-1/.test(parsed.hostname),
+      // Two strings run together: easy to do when the paste is not shown.
+      repeated: (String(url).match(/postgres(?:ql)?:\/\//g) || []).length > 1,
     };
   } catch {
     return null;
@@ -38,6 +41,8 @@ function connectionHint(error, role) {
       ? "The password is wrong, or portal_api has none yet. In Supabase's SQL editor: alter role portal_api with login password '…';"
       : "The password is wrong: it is the database password set when the project was created (Supabase → Project Settings → Database).";
   if (/tenant or user not found/i.test(message)) return `The user must be ${role}.<project-ref>, as Supabase → Connect shows it.`;
+  if (/invalid format for user or db_name/i.test(message))
+    return `The pooler could not read the user or database name. The user must be ${role}.<project-ref>, and the string must end in /postgres with nothing after it.`;
   if (/ENOTFOUND|getaddrinfo/i.test(message)) return "The host name is wrong: copy the string again from Supabase → Connect.";
   if (/timeout|ETIMEDOUT|ECONNREFUSED/i.test(message)) return "Nothing answered: check the host and port, and that this network allows outgoing database connections.";
   return message;
@@ -47,10 +52,19 @@ function connectionHint(error, role) {
  * SUPABASE_DB_URL: the connection the API uses. `db` is { query, transaction }
  * already connected, or a function that connects and returns one.
  */
+/** A string that could not work whatever its password: pasted twice, or not ending in /postgres. */
+function malformed(shape) {
+  if (shape.repeated) return fail("the string appears twice", "It was pasted twice, or with another string after it. Paste it once.");
+  if (shape.database !== "postgres") return fail("the string does not end in /postgres", "Copy it again from Supabase → Connect: the database name is postgres.");
+  return null;
+}
+
 export async function checkApiDatabase(url, db) {
   const results = [];
   const shape = describeDatabaseUrl(url);
   if (!shape) return [fail("SUPABASE_DB_URL is not a connection string", "Copy it from Supabase → Connect → Transaction pooler.")];
+  const broken = malformed(shape);
+  if (broken) return [broken];
   results.push(shape.user.startsWith("portal_api.")
     ? pass(`user ${shape.user.split(".")[0]}, host ${shape.host}`)
     : fail(`user ${shape.user}, host ${shape.host}`, "Use portal_api.<project-ref>: the API connects as portal_api, never as postgres."));
@@ -119,6 +133,8 @@ export async function checkOwnerDatabase(url, db) {
   const results = [];
   const shape = describeDatabaseUrl(url);
   if (!shape) return [fail("IMPORT_DB_URL is not a connection string", "Copy it from Supabase → Connect → Session pooler.")];
+  const broken = malformed(shape);
+  if (broken) return [broken];
   results.push(shape.user.startsWith("postgres.")
     ? pass(`user postgres, host ${shape.host}`)
     : fail(`user ${shape.user}`, "Use postgres.<project-ref>: the import needs the tables' owner."));
@@ -140,8 +156,11 @@ export async function checkOwnerDatabase(url, db) {
 /** A site: its proxy, its backend, Turnstile, and the worker endpoint (fully, given WORKER_TOKEN). */
 export async function checkSite(site, { fetch = globalThis.fetch, workerToken = "" } = {}) {
   const results = [];
-  const base = String(site || "").trim().replace(/\/+$/, "");
-  if (!/^https?:\/\/[^/]+$/.test(base)) return [fail("--site must be the site's address, like https://example.netlify.app")];
+  let base;
+  try {
+    base = new URL(String(site || "").trim()).origin; // https://site, whatever page was given
+  } catch {}
+  if (!base || !/^https?:/.test(base)) return [fail("the site must be an address, like https://example.netlify.app")];
   const post = async (path, body, headers = {}) => {
     const response = await fetch(`${base}${path}`, {
       method: "POST",
@@ -197,8 +216,12 @@ export async function checkSite(site, { fetch = globalThis.fetch, workerToken = 
     results.push(fail("no worker endpoint", "The deploy does not include netlify/functions/worker.mjs: deploy the current code."));
     return results;
   }
-  if (anonymous.status === 401) results.push(pass("worker endpoint up, and refuses requests without its token"));
-  else results.push(fail("worker endpoint", anonymous.data?.error || `HTTP ${anonymous.status}`));
+  if (anonymous.status !== 401) {
+    // Not set up (no token, or no database): nothing more can be learned from inside.
+    results.push(fail("worker endpoint", anonymous.data?.error || `HTTP ${anonymous.status}`));
+    return results;
+  }
+  results.push(pass("worker endpoint up, and refuses requests without its token"));
   if (!workerToken) {
     results.push(info("set WORKER_TOKEN to check the site's settings and its database from the inside"));
     return results;
