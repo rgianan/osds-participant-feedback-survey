@@ -150,7 +150,8 @@
    and text-transform/color inherit outright — without this reset the question
    text itself renders 11px, uppercase and grey. */
 .question-editor .question-fields > label textarea,
-.question-editor .question-fields > label select {
+.question-editor .question-fields > label select,
+.question-editor .question-controls > label select {
   font-size: 13px;
   font-weight: 600;
   text-transform: none;
@@ -171,6 +172,80 @@
 .question-editor textarea {
   min-height: 86px;
   margin: 0;
+}
+/* Sections: one page of the survey each. */
+.question-section {
+  margin-top: 22px;
+  padding-top: 18px;
+  border-top: 1px solid var(--border);
+}
+.question-section-head {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  margin-bottom: 14px;
+}
+.question-section-head h3 {
+  margin: 0;
+  font-size: 15px;
+  color: #16213d;
+}
+.question-page {
+  font-size: 11px;
+  font-weight: 800;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  color: var(--muted);
+  white-space: nowrap;
+}
+.question-section-name {
+  flex: 1;
+  margin: 0;
+  font-size: 15px;
+  font-weight: 700;
+}
+.question-empty {
+  margin: 0 0 12px;
+  font-size: 13px;
+  color: var(--muted);
+}
+.question-controls {
+  display: flex;
+  align-items: flex-end;
+  gap: 10px;
+  flex-wrap: wrap;
+}
+.question-controls > label {
+  flex: 1;
+  min-width: 180px;
+  margin: 0;
+  font-size: 11px;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  color: var(--muted);
+}
+.question-actions {
+  display: flex;
+  gap: 6px;
+}
+.question-actions .mini-button,
+.question-add {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+.question-add {
+  margin-top: 12px;
+}
+.question-add-section {
+  margin-top: 22px;
+}
+.mini-button.danger {
+  color: #a3352b;
+}
+.mini-button:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
 }
 @media (max-width: 1050px) {
   .superadmin-grid,

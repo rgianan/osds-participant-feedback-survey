@@ -102,13 +102,22 @@ export const handler = async (event, context = {}) => {
       delete payload.turnstileToken;
       if (payload.payload) delete payload.payload.turnstileToken;
     }
+    const requestId = String(
+      context.awsRequestId || event.headers?.["x-nf-request-id"] || "",
+    ).slice(0, 100);
+    // Supabase migration: BACKEND=supabase answers from Postgres instead of
+    // Apps Script, after the same Turnstile check. The module is loaded only
+    // on that path, so the Apps Script path below never imports it.
+    if (String(process.env.BACKEND || "").trim().toLowerCase() === "supabase") {
+      const { handleSupabaseRequest } = await import("../backend/index.mjs");
+      return json(
+        200,
+        await handleSupabaseRequest(payload, { requestId, portalBaseUrl }),
+      );
+    }
     payload.proxyToken = sharedToken;
     payload.portalBaseUrl = portalBaseUrl;
-    payload.requestContext = {
-      requestId: String(
-        context.awsRequestId || event.headers?.["x-nf-request-id"] || "",
-      ).slice(0, 100),
-    };
+    payload.requestContext = { requestId };
     const upstream = await fetch(gasUrl, {
       method: "POST",
       headers: { "content-type": "text/plain;charset=utf-8" },

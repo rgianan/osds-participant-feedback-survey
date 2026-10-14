@@ -1,4 +1,5 @@
 import { cached, invalidate, keyFor, patch, CACHE_TTL } from "./cache";
+import { allQuestions, normalizeSurvey, savePayload } from "./survey";
 
 const GAS_URL = import.meta.env.VITE_GAS_WEB_APP_URL || "";
 const USE_NETLIFY_PROXY =
@@ -12,7 +13,7 @@ const DEMO_MODE =
 export { invalidate as invalidateCache, patch as patchCache, keyFor as cacheKey };
 
 // Answer formats, mirroring QUESTION_TYPES in Code.gs. Keep the two in step.
-export const QUESTION_TYPES = ["rating", "text", "yesno"];
+export { QUESTION_TYPES } from "./survey";
 
 const SESSION_KEY = "participant_feedback_admin_session";
 const adminToken = () => {
@@ -149,27 +150,22 @@ export async function getActivities() {
     ? gasRun("getActivityData")
     : remote("getActivityData");
 }
+/**
+ * The survey, as one model whichever backend answers: Apps Script's 15
+ * questions or the new backend's sections (see survey.js).
+ */
 export async function getQuestions() {
-  if (DEMO_MODE && !HAS_REMOTE) return demoQuestions;
+  if (DEMO_MODE && !HAS_REMOTE) return normalizeSurvey(demoQuestions);
   requireBackend();
-  const q = window.google?.script
-    ? await gasRun("getQuestions")
-    : await remote("getQuestions");
-  // Each entry is {text, type}. Anything unrecognized falls back to the 1-5
-  // scale, but every supported type must be listed here: a type missing from
-  // this set is silently downgraded and the question renders as the wrong kind.
-  const questions = Array.from({ length: 15 }, (_, i) => {
-    const type = String(q[`type${i + 1}`] || "").toLowerCase();
-    return {
-      text: String(q[`question${i + 1}`] || "").trim(),
-      type: QUESTION_TYPES.includes(type) ? type : "rating",
-    };
-  });
-  if (questions.some((question) => !question.text))
+  const survey = normalizeSurvey(
+    window.google?.script ? await gasRun("getQuestions") : await remote("getQuestions"),
+  );
+  const questions = allQuestions(survey);
+  if (!questions.length || questions.some((question) => !question.text))
     throw new Error(
       "The survey questions are not configured. Ask a superadmin to complete the Questions module.",
     );
-  return questions;
+  return survey;
 }
 export async function submitFeedback(payload, turnstileToken = "") {
   if (window.google?.script) return gasRun("submitFeedback", payload);
@@ -324,23 +320,25 @@ export async function saveAdminUser(payload) {
   return { ...payload, user_id: payload.user_id || `U-${Date.now()}` };
 }
 export async function getAdminQuestions() {
-  if (window.google?.script) return gasRun("adminGetQuestions", adminToken());
-  if (HAS_REMOTE)
-    return remote("adminGetQuestions", { adminToken: adminToken() });
-  if (!DEMO_MODE) requireBackend();
-  return demoQuestions;
-}
-export async function saveAdminQuestions(questions) {
-  invalidate("questions:");
   if (window.google?.script)
-    return gasRun("adminSaveQuestions", questions, adminToken());
+    return normalizeSurvey(await gasRun("adminGetQuestions", adminToken()));
   if (HAS_REMOTE)
-    return remote("adminSaveQuestions", {
-      questions,
-      adminToken: adminToken(),
-    });
+    return normalizeSurvey(await remote("adminGetQuestions", { adminToken: adminToken() }));
   if (!DEMO_MODE) requireBackend();
-  return questions;
+  return normalizeSurvey(demoQuestions);
+}
+/** Saves the editor's survey in the shape the answering backend expects, and returns it as saved. */
+export async function saveAdminQuestions(survey) {
+  invalidate("questions:");
+  const questions = savePayload(survey);
+  if (window.google?.script)
+    return normalizeSurvey(await gasRun("adminSaveQuestions", questions, adminToken()));
+  if (HAS_REMOTE)
+    return normalizeSurvey(
+      await remote("adminSaveQuestions", { questions, adminToken: adminToken() }),
+    );
+  if (!DEMO_MODE) requireBackend();
+  return survey;
 }
 export async function getAdminDashboard(
   filters = {},

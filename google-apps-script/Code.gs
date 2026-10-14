@@ -69,6 +69,7 @@ function doPost(e) {
     else if (action === 'adminSetActivityStatus') data = adminSetActivityStatus(body.payload || {}, body.adminToken);
     else if (action === 'adminDeleteActivity') data = adminDeleteActivity(body.id || (body.payload && body.payload.id), body.adminToken, body.activityId || (body.payload && body.payload.activityId));
     else if (action === 'adminUploadSignature') data = adminUploadSignature(body.payload || {}, body.adminToken);
+    else if (action === 'workerUploadSignature') data = workerUploadSignature(body.payload || {}, body.workerToken);
     else if (action === 'adminGetFeedbackAnalytics') data = adminGetFeedbackAnalytics(body.activityId, body.adminToken);
     else if (action === 'adminGetUsers') data = adminGetUsers(body.adminToken);
     else if (action === 'adminSaveUser') data = adminSaveUser(body.payload || {}, body.adminToken);
@@ -266,6 +267,22 @@ function setupParticipantFeedbackSecurity() {
  * The previous name (logSubmitSharedToken) read like a query and invited
  * exactly this mistake.
  */
+/**
+ * Supabase migration. Creates the secret shared by the new Netlify backend
+ * and this script (workerUploadSignature now; the certificate worker in phase
+ * 2), and logs it once. Copy it into Netlify as WORKER_TOKEN. Running it
+ * again replaces the token, so Netlify must be updated too.
+ *
+ * Stored in full rather than hashed, unlike the proxy token: in phase 2 this
+ * script sends it to Netlify as well as checking it.
+ */
+function setupWorkerToken() {
+  assertEditorContext_('setupWorkerToken');
+  var token = randomSecret_();
+  PropertiesService.getScriptProperties().setProperty('WORKER_TOKEN', token);
+  Logger.log(JSON.stringify({ netlifyVariable: 'WORKER_TOKEN', value: token, note: 'Copy this into Netlify now.' }, null, 2));
+}
+
 function rotateSubmitSharedTokenAndLog() {
   assertEditorContext_('rotateSubmitSharedTokenAndLog');
   Logger.log(JSON.stringify(setupParticipantFeedbackSecurity(), null, 2));
@@ -1213,6 +1230,10 @@ function processCertificateQueue() {
   var processed = 0;
   var failed = 0;
   try {
+    // Supabase migration: once CERTIFICATE_SOURCE is "api", jobs come from the
+    // new backend instead of the Responses sheet. Same certificate, same email.
+    if (certificateSource_() === 'api') return processApiCertificateQueue_(startedAt);
+
     var ss = SpreadsheetApp.getActiveSpreadsheet();
     var sh = ss.getSheetByName('Responses');
     if (!sh || sh.getLastRow() < 2) return { status: 'EMPTY', processed: 0 };
@@ -1334,11 +1355,95 @@ function sendCertificateForResponse_(responsesRowIndex) {
   var aSignature = cSignature>=0?safeTrim_(aRow[cSignature]):'';
   var aSignatory = cSignatory>=0?safeTrim_(aRow[cSignatory]):'';
 
+  var meta = issueCertificate_({
+    name: name, email: email, title: aTitle, venue: aVenue, date: aDate, fromDate: aFrom, toDate: aTo,
+    givenDate: aGiven, templateUrl: templateUrl, signatory: aSignatory, designation: aDesignation,
+    signature: aSignature, verificationCode: verification.code, verificationUrl: verification.url
+  });
+  return { certificateUrl: meta.certificateUrl, emailStatus: meta.emailStatus };
+}
+
+/**
+ * Builds, stores and emails one certificate. Both queues use this: the Sheets
+ * queue builds `job` from a Responses row (sendCertificateForResponse_), the
+ * API queue receives it from the new backend (processApiCertificateQueue_).
+ *
+ * job: { name, email, title, venue, date?, fromDate, toDate, givenDate,
+ *        templateUrl, signatory, designation, signature, verificationCode,
+ *        verificationUrl, pdfName?, reuseExistingPdf? }
+ *
+ * With reuseExistingPdf, a PDF already saved under pdfName is used as it is.
+ * That is the API queue's recovery case: a run that saved the PDF and then
+ * died is followed by one that only needs to send the email.
+ *
+ * Returns { certificateUrl, emailStatus (the sheet's text), emailedAt (ISO,
+ * or '' when there was no recipient), note }.
+ */
+function issueCertificate_(job) {
+  var name = safeTrim_(job.name), email = safeTrim_(job.email), aTitle = safeTrim_(job.title);
+  var aVenue = safeTrim_(job.venue), aDate = safeTrim_(job.date), aFrom = safeTrim_(job.fromDate);
+  var aTo = safeTrim_(job.toDate), aGiven = safeTrim_(job.givenDate), templateUrl = safeTrim_(job.templateUrl);
+  var aSignatory = safeTrim_(job.signatory), aDesignation = safeTrim_(job.designation), aSignature = safeTrim_(job.signature);
+  var verification = { code: safeTrim_(job.verificationCode), url: safeTrim_(job.verificationUrl) };
+  var pdfName = safeTrim_(job.pdfName) || ('Certificate - ' + name + ' - ' + aTitle + '.pdf');
+
+  if (!name) throw new Error('Response "Name" is blank.');
   if (!templateUrl) throw new Error('Missing certificate template for selected activity.');
 
-  // --- Validate template & destination folder ---
-  var tpl = parseAndAssertFile_(templateUrl, "Template");
   var certFolder = assertFolder_(CERTIFICATES_FOLDER_ID, "Certificates folder");
+  var existing = job.reuseExistingPdf ? certFolder.getFilesByName(pdfName) : null;
+  var pdfFile = existing && existing.hasNext() ? existing.next() : null;
+  if (!pdfFile) pdfFile = buildCertificatePdf_(certFolder, pdfName, {
+    name: name, title: aTitle, venue: aVenue, date: aDate, fromDate: aFrom, toDate: aTo, givenDate: aGiven,
+    templateUrl: templateUrl, signatory: aSignatory, designation: aDesignation, signature: aSignature,
+    verification: verification
+  });
+
+  var sharingWarning = '';
+  try {
+    // Choose policy: ANYONE_WITH_LINK or DOMAIN_WITH_LINK
+    pdfFile.setSharing(DriveApp.Access.ANYONE_WITH_LINK, DriveApp.Permission.VIEW);
+    // pdfFile.setSharing(DriveApp.Access.DOMAIN_WITH_LINK, DriveApp.Permission.VIEW);
+  } catch (sharingError){
+    // A Workspace policy can forbid link sharing. The email would then carry a
+    // link the recipient cannot open, so record it instead of failing silently.
+    sharingWarning = ' (link sharing blocked: ' + String(sharingError && sharingError.message || sharingError).slice(0, 120) + ')';
+  }
+  var certUrl = pdfFile.getUrl();
+
+  // --- Email link (no attachment) ---
+  if (!email) return { certificateUrl: certUrl, emailStatus: 'No recipient email' + sharingWarning, emailedAt: '', note: ('No recipient email' + sharingWarning).trim() };
+  var sentAt = new Date();
+  var mail = buildCertificateEmail_({
+    name: name,
+    title: aTitle,
+    venue: aVenue,
+    dateRange: activityDateRangeText_(aFrom, aTo),
+    certificateUrl: certUrl,
+    verificationCode: verification.code,
+    verificationUrl: verification.url
+  });
+  MailApp.sendEmail({
+    to: email,
+    subject: mail.subject,
+    body: mail.text,
+    htmlBody: mail.html,
+    name: 'CHED Office of Student Development and Services'
+  });
+  return {
+    certificateUrl: certUrl,
+    emailStatus: Utilities.formatDate(sentAt, Session.getScriptTimeZone() || 'UTC', 'yyyy-MM-dd HH:mm') + sharingWarning,
+    emailedAt: sentAt.toISOString(),
+    note: sharingWarning.trim()
+  };
+}
+
+/** Copies the template, fills it in, and saves the PDF into the certificates folder. */
+function buildCertificatePdf_(certFolder, pdfName, c) {
+  var name = c.name, aTitle = c.title, aVenue = c.venue, aDate = c.date, aFrom = c.fromDate, aTo = c.toDate;
+  var aGiven = c.givenDate, aSignatory = c.signatory, aDesignation = c.designation, aSignature = c.signature;
+  var verification = c.verification;
+  var tpl = parseAndAssertFile_(c.templateUrl, "Template");
 
   // --- Prepare editable Slides doc ---
   var slidesId, baseTitle = ('Cert - ' + name + ' - ' + aTitle).slice(0, 180);
@@ -1377,54 +1482,126 @@ function sendCertificateForResponse_(responsesRowIndex) {
   replaceQrPlaceholder_(pres, verification.url);
   pres.saveAndClose();
 
-  // --- Export to PDF, store, and share ---
+  // --- Export to PDF and store ---
   var pdfBlob = driveExportFileAsPdf_(slidesId);
-  pdfBlob.setName('Certificate - ' + name + ' - ' + aTitle + '.pdf');
-
+  pdfBlob.setName(pdfName);
   var pdfFile = certFolder.createFile(pdfBlob);
-  var sharingWarning = '';
-  try {
-    // Choose policy: ANYONE_WITH_LINK or DOMAIN_WITH_LINK
-    pdfFile.setSharing(DriveApp.Access.ANYONE_WITH_LINK, DriveApp.Permission.VIEW);
-    // pdfFile.setSharing(DriveApp.Access.DOMAIN_WITH_LINK, DriveApp.Permission.VIEW);
-  } catch (sharingError){
-    // A Workspace policy can forbid link sharing. The email would then carry a
-    // link the recipient cannot open, so record it instead of failing silently.
-    sharingWarning = ' (link sharing blocked: ' + String(sharingError && sharingError.message || sharingError).slice(0, 120) + ')';
-  }
-  var certUrl = pdfFile.getUrl();
 
   // The editable Slides copy was only an intermediate step. Left behind, every
   // certificate would leave a second, modifiable file in the certificates
   // folder carrying the participant's name.
   try { DriveApp.getFileById(slidesId).setTrashed(true); } catch (cleanupError) {}
+  return pdfFile;
+}
 
-  // --- Email link (no attachment) ---
-  var emailStatus = '';
-  if (email) {
-    var sentAt = Utilities.formatDate(new Date(), Session.getScriptTimeZone() || 'UTC', 'yyyy-MM-dd HH:mm');
-    var mail = buildCertificateEmail_({
-      name: name,
-      title: aTitle,
-      venue: aVenue,
-      dateRange: activityDateRangeText_(aFrom, aTo),
-      certificateUrl: certUrl,
-      verificationCode: verification.code,
-      verificationUrl: verification.url
-    });
-    MailApp.sendEmail({
-      to: email,
-      subject: mail.subject,
-      body: mail.text,
-      htmlBody: mail.html,
-      name: 'CHED Office of Student Development and Services'
-    });
-    emailStatus = sentAt + sharingWarning;
-  } else {
-    emailStatus = 'No recipient email' + sharingWarning;
+// ------------------------ Certificate worker (Supabase) ------------------------
+
+/** Where certificate jobs come from: "sheets" (the default) or "api", from Script Property CERTIFICATE_SOURCE. */
+function certificateSource_() {
+  return safeTrim_(PropertiesService.getScriptProperties().getProperty('CERTIFICATE_SOURCE')).toLowerCase() === 'api' ? 'api' : 'sheets';
+}
+
+/**
+ * One call to the new backend's worker endpoint (Script Property
+ * WORKER_API_URL, e.g. https://<site>/.netlify/functions/worker), signed with
+ * WORKER_TOKEN. Throws the endpoint's own error so it reaches the executions log.
+ */
+function workerApi_(action, body) {
+  var props = PropertiesService.getScriptProperties();
+  var url = safeTrim_(props.getProperty('WORKER_API_URL'));
+  var token = safeTrim_(props.getProperty('WORKER_TOKEN'));
+  if (!/^https:\/\//.test(url)) throw new Error('Set Script Property WORKER_API_URL to https://<your-site>/.netlify/functions/worker.');
+  if (!token) throw new Error('The worker token is not configured. Run setupWorkerToken() from the Apps Script editor.');
+  var payload = { action: action };
+  Object.keys(body || {}).forEach(function(key){ payload[key] = body[key]; });
+  var response = UrlFetchApp.fetch(url, {
+    method: 'post',
+    contentType: 'application/json',
+    headers: { Authorization: 'Bearer ' + token },
+    payload: JSON.stringify(payload),
+    muteHttpExceptions: true
+  });
+  var data;
+  try { data = JSON.parse(response.getContentText()); }
+  catch (parseError) { throw new Error('The worker API did not return JSON (HTTP ' + response.getResponseCode() + '). Check WORKER_API_URL.'); }
+  if (!data.ok) throw new Error(data.error || ('The worker API refused ' + action + '.'));
+  return data.data;
+}
+
+/**
+ * The API queue: claim up to 10 jobs, make each certificate, report each
+ * result. The backend's claim decides what is due, skips ended activities,
+ * and gives a job back once its 15-minute claim runs out, so a run that dies
+ * part-way leaves nothing stuck.
+ */
+function processApiCertificateQueue_(startedAt) {
+  var remainingMail = MailApp.getRemainingDailyQuota();
+  if (remainingMail < 1) return { status: 'EMAIL_QUOTA_EXHAUSTED', processed: 0 };
+  var jobs = (workerApi_('workerClaimCertificateJobs', { batchSize: Math.min(CERTIFICATE_BATCH_SIZE, remainingMail) }) || {}).jobs || [];
+  var processed = 0, failed = 0, released = 0;
+  for (var i = 0; i < jobs.length; i++) {
+    var job = jobs[i];
+    if (Date.now() - startedAt > CERTIFICATE_RUN_BUDGET_MS) {
+      // Out of time: give the rest back now rather than leaving them for the lease.
+      for (var j = i; j < jobs.length; j++) {
+        workerApi_('workerReleaseCertificateJob', { responseId: jobs[j].responseId, claimToken: jobs[j].claimToken });
+        released++;
+      }
+      break;
+    }
+    var report = { responseId: job.responseId, claimToken: job.claimToken };
+    try {
+      var meta = issueCertificate_({
+        name: job.name, email: job.email, title: job.title, venue: job.venue, fromDate: job.fromDate,
+        toDate: job.toDate, givenDate: job.givenDate, templateUrl: job.templateUrl, signatory: job.signatory,
+        designation: job.designation, signature: job.signature, verificationCode: job.verificationCode,
+        verificationUrl: job.verificationUrl,
+        // The verification code in the name is what lets a later run find this PDF.
+        pdfName: ('Certificate - ' + safeTrim_(job.name) + ' - ' + safeTrim_(job.title)).slice(0, 180) + ' - ' + job.verificationCode + '.pdf',
+        reuseExistingPdf: true
+      });
+      report.ok = true;
+      report.certificateUrl = meta.certificateUrl;
+      report.emailedAt = meta.emailedAt;
+      report.note = meta.note;
+      processed++;
+    } catch (error) {
+      report.ok = false;
+      report.error = String(error && error.message || error).slice(0, 450);
+      failed++;
+    }
+    // Deliberately not caught: if the report cannot be delivered, this run
+    // stops, and the job's claim brings it back for the next one.
+    workerApi_('workerCompleteCertificateJob', report);
   }
+  return { status: 'OK', source: 'api', claimed: jobs.length, processed: processed, failed: failed, released: released };
+}
 
-  return { certificateUrl: certUrl, emailStatus: emailStatus };
+/**
+ * Editor check before switching CERTIFICATE_SOURCE to "api": reaches the
+ * worker endpoint with the stored token and reports what it finds. Changes
+ * nothing.
+ */
+function checkWorkerApi() {
+  assertEditorContext_('checkWorkerApi');
+  var props = PropertiesService.getScriptProperties();
+  var result = {
+    certificateSource: certificateSource_(),
+    workerApiUrl: safeTrim_(props.getProperty('WORKER_API_URL')) || '(not set)',
+    workerTokenSet: !!safeTrim_(props.getProperty('WORKER_TOKEN')),
+    queueTrigger: ScriptApp.getProjectTriggers().some(function(t){ return t.getHandlerFunction() === 'processCertificateQueue'; })
+  };
+  try {
+    result.reached = workerApi_('workerPing', {});
+    result.verdict = result.certificateSource === 'api'
+      ? 'Connected. Certificates are coming from the new backend.'
+      : 'Connected. Set Script Property CERTIFICATE_SOURCE to "api" to take certificates from the new backend.';
+  } catch (error) {
+    result.error = String(error && error.message || error);
+    result.verdict = 'Not connected: ' + result.error;
+  }
+  Logger.log(JSON.stringify(result, null, 2));
+  return result;
 }
 
 /**
@@ -2029,11 +2206,36 @@ function adminWhoAmI() {
 
 function adminUploadSignature(fileObj, adminToken) {
   if (!isAdminAuthorized_(adminToken)) throw new Error('Forbidden: administrator authorization required.');
+  return saveSignatureImage_(fileObj);
+}
+
+/**
+ * Supabase migration: the new backend signs administrators in itself, so it
+ * cannot pass an Apps Script session. It checks the admin, then forwards the
+ * image here, because only Apps Script can write to Drive.
+ *
+ * This takes a SEPARATE secret from the proxy token on purpose. gas-proxy
+ * attaches the proxy token to every request a browser sends; were that token
+ * enough, anyone could call this through the proxy and skip the admin check.
+ * The worker token never reaches a browser.
+ */
+function workerUploadSignature(fileObj, workerToken) {
+  assertWorkerToken_(workerToken);
+  return saveSignatureImage_(fileObj);
+}
+
+function saveSignatureImage_(fileObj) {
   if (!fileObj || !fileObj.base64 || !fileObj.filename || !/^image\/(png|jpeg|webp)$/i.test(String(fileObj.mimeType || '')) || fileObj.base64.length > 2800000) throw new Error('Please upload a PNG, JPG, or WebP signature image no larger than 2 MB.');
   var folder = assertFolder_(TEMPLATE_FOLDER_ID, 'Template folder');
   var blob = Utilities.newBlob(Utilities.base64Decode(fileObj.base64), fileObj.mimeType, fileObj.filename);
   var file = folder.createFile(blob);
   return {id:file.getId(),name:file.getName(),url:file.getUrl()};
+}
+
+function assertWorkerToken_(token) {
+  var expected = PropertiesService.getScriptProperties().getProperty('WORKER_TOKEN');
+  if (!expected) throw new Error('The worker token is not configured. Run setupWorkerToken() from the Apps Script editor.');
+  if (!token || !constantTimeEquals_(String(token), expected)) throw new Error('Forbidden: invalid worker token.');
 }
 
 /** Aggregates participant ratings and certificate queue health for admin charts. */

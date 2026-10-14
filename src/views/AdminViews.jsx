@@ -1,5 +1,7 @@
 import React, { useEffect, useMemo, useRef, useState } from "react";
 import {
+  ArrowDown,
+  ArrowUp,
   Check,
   ChevronDown,
   ClipboardList,
@@ -38,6 +40,7 @@ import {
   saveAdminUser,
   uploadSignature,
 } from "../lib/api";
+import { QUESTION_LIMITS, allQuestions, surveyProblem } from "../lib/survey";
 import { Brand, Skeleton, SkeletonTable, Tooltip, TurnstileWidget } from "./shared";
 
 const NOT_OWNER_HINT =
@@ -260,7 +263,7 @@ export function AdminDashboard() {
     users: ["Users", "Create and maintain administrator access."],
     questions: [
       "Survey questions",
-      "Edit the 15 participant questions and their answer types.",
+      "Edit the survey's pages, questions and answer types.",
     ],
     audit: ["Audit log", "Review administrator access and privileged changes."],
   }[tab] || ["Activities", "Manage the certificate portal."];
@@ -729,7 +732,15 @@ function ResponsesPanel({ activities }) {
                       <div className="answer-grid">
                         {entry.answers.map((answer) => (
                           <div key={answer.number}>
-                            <span>Q{answer.number}</span>
+                            <span
+                              title={
+                                answer.question
+                                  ? `${answer.retired ? "Retired question" : answer.section}: ${answer.question}`
+                                  : undefined
+                              }
+                            >
+                              {answer.number ? `Q${answer.number}` : "Earlier"}
+                            </span>
                             <strong>{answer.value || "—"}</strong>
                           </div>
                         ))}
@@ -1198,27 +1209,77 @@ function UsersPanel() {
   );
 }
 
+let newQuestionCount = 0;
+const blankQuestion = () => ({ key: `new-${++newQuestionCount}`, id: null, text: "", type: "rating" });
+
+/**
+ * The survey editor. With the new database, sections (pages) and questions
+ * can be added, removed and reordered, 1 to 30 questions in all. Apps Script
+ * stores exactly 15, so while it answers, only wording and type are editable.
+ */
 function QuestionsPanel() {
-  const [questions, setQuestions] = useState(
-    Array.from({ length: 15 }, () => ({ text: "", type: "rating" })),
-  ),
+  const [survey, setSurvey] = useState(null),
     [loading, setLoading] = useState(true),
     [saving, setSaving] = useState(false),
+    [dirty, setDirty] = useState(false),
     [message, setMessage] = useState(""),
     [error, setError] = useState("");
   useEffect(() => {
     getAdminQuestions()
-      .then(setQuestions)
+      .then(setSurvey)
       .catch((e) => setError(e.message))
       .finally(() => setLoading(false));
   }, []);
+
+  // Every change goes through here, on a copy, so React sees a new survey.
+  const change = (edit) => {
+    setSurvey((current) => {
+      const next = { ...current, sections: current.sections.map((s) => ({ ...s, questions: [...s.questions] })) };
+      edit(next.sections);
+      return next;
+    });
+    setDirty(true);
+    setMessage("");
+  };
+  const total = survey ? allQuestions(survey).length : 0;
+  const full = total >= QUESTION_LIMITS.max;
+
+  const editQuestion = (si, qi, changes) =>
+    change((sections) => {
+      sections[si].questions[qi] = { ...sections[si].questions[qi], ...changes };
+    });
+  // Up from the top of a page moves it to the end of the page before; down
+  // from the bottom, to the start of the page after.
+  const moveQuestion = (si, qi, step) =>
+    change((sections) => {
+      const [question] = sections[si].questions.splice(qi, 1);
+      const target = qi + step;
+      if (target < 0) sections[si - 1].questions.push(question);
+      else if (target > sections[si].questions.length) sections[si + 1].questions.unshift(question);
+      else sections[si].questions.splice(target, 0, question);
+    });
+  const moveSection = (si, step) =>
+    change((sections) => {
+      const [section] = sections.splice(si, 1);
+      sections.splice(si + step, 0, section);
+    });
+  const removeSection = (si) => {
+    const count = survey.sections[si].questions.length;
+    if (count && !confirm(`Remove "${survey.sections[si].name}" and its ${count} question${count === 1 ? "" : "s"}? Their answers stay in Responses and Analytics.`))
+      return;
+    change((sections) => sections.splice(si, 1));
+  };
+
   async function save(e) {
     e.preventDefault();
-    setSaving(true);
     setMessage("");
+    const problem = surveyProblem(survey);
+    if (problem) return setError(problem);
+    setSaving(true);
     setError("");
     try {
-      setQuestions(await saveAdminQuestions(questions));
+      setSurvey(await saveAdminQuestions(survey));
+      setDirty(false);
       setMessage("Survey questions saved.");
     } catch (saveError) {
       setError(saveError.message);
@@ -1226,31 +1287,42 @@ function QuestionsPanel() {
       setSaving(false);
     }
   }
-  if (loading)
+
+  if (loading || !survey)
     return (
       <section className="management-card" role="status" aria-label="Loading questions">
-        <Skeleton width={210} height={14} />
-        <div className="question-editor" style={{ marginTop: 20 }}>
-          {Array.from({ length: 6 }, (_, i) => (
-            <div key={i} className="question-row">
-              <Skeleton width={30} height={30} radius={9} />
-              <div style={{ display: "grid", gap: 10 }}>
-                <Skeleton width="100%" height={54} radius={10} />
-                <Skeleton width="42%" height={30} radius={10} />
-              </div>
+        {error ? (
+          <div className="alert">{error}</div>
+        ) : (
+          <>
+            <Skeleton width={210} height={14} />
+            <div className="question-editor" style={{ marginTop: 20 }}>
+              {Array.from({ length: 6 }, (_, i) => (
+                <div key={i} className="question-row">
+                  <Skeleton width={30} height={30} radius={9} />
+                  <div style={{ display: "grid", gap: 10 }}>
+                    <Skeleton width="100%" height={54} radius={10} />
+                    <Skeleton width="42%" height={30} radius={10} />
+                  </div>
+                </div>
+              ))}
             </div>
-          ))}
-        </div>
+          </>
+        )}
       </section>
     );
+
+  const { adjustable } = survey;
+  let number = 0;
   return (
     <form className="management-card questions-form" onSubmit={save}>
       <div className="management-heading">
         <div>
           <h2>Participant survey questions</h2>
           <p>
-            Changes apply to new survey responses. Choose an answer type per
-            question: a 1–5 multiple option, yes or no, or a long text reply.
+            {adjustable
+              ? `Each section is one page of the survey. ${total} of ${QUESTION_LIMITS.max} questions. A removed question leaves the survey, but its answers stay in Responses and Analytics.`
+              : "Edit each question's wording and answer type. The survey has 15 questions, five to a page."}
           </p>
         </div>
         <button
@@ -1258,49 +1330,123 @@ function QuestionsPanel() {
           disabled={saving}
           title="Save all survey questions"
         >
-          {saving ? "Saving…" : "Save questions"}
+          {saving ? "Saving…" : dirty ? "Save changes" : "Save questions"}
         </button>
       </div>
       {error && <div className="alert">{error}</div>}
       {message && <div className="notice">{message}</div>}
-      <div className="question-editor">
-        {questions.map((question, index) => {
-          const patch = (changes) =>
-            setQuestions(
-              questions.map((item, i) =>
-                i === index ? { ...item, ...changes } : item,
-              ),
-            );
-          return (
-            <div className="question-row" key={index}>
-              <span className="question-number">{index + 1}</span>
-              <div className="question-fields">
-                <label>
-                  Question {index + 1}
-                  <textarea
-                    required
-                    value={question.text}
-                    onChange={(e) => patch({ text: e.target.value })}
-                  />
-                </label>
-                <label>
-                  Answer type
-                  <select
-                    className="question-type"
-                    value={question.type}
-                    onChange={(e) => patch({ type: e.target.value })}
-                    title="How participants answer this question."
-                  >
-                    <option value="rating">Multiple option (1–5)</option>
-                    <option value="yesno">Yes or No</option>
-                    <option value="text">Long text</option>
-                  </select>
-                </label>
+      {survey.sections.map((section, si) => (
+        <section className="question-section" key={section.id || `section-${si}`}>
+          <header className="question-section-head">
+            <span className="question-page">Page {si + 1}</span>
+            {adjustable ? (
+              <input
+                className="question-section-name"
+                value={section.name}
+                maxLength={120}
+                onChange={(e) => change((sections) => { sections[si] = { ...sections[si], name: e.target.value }; })}
+                aria-label={`Name of page ${si + 1}`}
+                placeholder="Section name"
+              />
+            ) : (
+              <h3>{section.name}</h3>
+            )}
+            {adjustable && (
+              <div className="question-actions">
+                <button type="button" className="mini-button" disabled={si === 0} onClick={() => moveSection(si, -1)}
+                  aria-label={`Move page ${si + 1} earlier`} title="Move this page earlier">
+                  <ArrowUp size={14} />
+                </button>
+                <button type="button" className="mini-button" disabled={si === survey.sections.length - 1}
+                  onClick={() => moveSection(si, 1)} aria-label={`Move page ${si + 1} later`} title="Move this page later">
+                  <ArrowDown size={14} />
+                </button>
+                <button type="button" className="mini-button danger" disabled={survey.sections.length === 1}
+                  onClick={() => removeSection(si)} aria-label={`Remove page ${si + 1}`} title="Remove this page">
+                  <Trash2 size={14} />
+                </button>
               </div>
-            </div>
-          );
-        })}
-      </div>
+            )}
+          </header>
+          {!section.questions.length && (
+            <p className="question-empty">No questions yet. Participants will not see this page until it has one.</p>
+          )}
+          <div className="question-editor">
+            {section.questions.map((question, qi) => {
+              number += 1;
+              const first = si === 0 && qi === 0;
+              const last = si === survey.sections.length - 1 && qi === section.questions.length - 1;
+              return (
+                <div className="question-row" key={question.key}>
+                  <span className="question-number">{number}</span>
+                  <div className="question-fields">
+                    <label>
+                      Question {number}
+                      <textarea
+                        required
+                        maxLength={500}
+                        value={question.text}
+                        onChange={(e) => editQuestion(si, qi, { text: e.target.value })}
+                      />
+                    </label>
+                    <div className="question-controls">
+                      <label>
+                        Answer type
+                        <select
+                          className="question-type"
+                          value={question.type}
+                          onChange={(e) => editQuestion(si, qi, { type: e.target.value })}
+                          title={
+                            question.id && adjustable
+                              ? "Changing the type of a question that has answers starts a new question; its earlier answers stay with the old one."
+                              : "How participants answer this question."
+                          }
+                        >
+                          <option value="rating">Multiple option (1–5)</option>
+                          <option value="yesno">Yes or No</option>
+                          <option value="text">Long text</option>
+                        </select>
+                      </label>
+                      {adjustable && (
+                        <div className="question-actions">
+                          <button type="button" className="mini-button" disabled={first} onClick={() => moveQuestion(si, qi, -1)}
+                            aria-label={`Move question ${number} up`} title="Move up">
+                            <ArrowUp size={14} />
+                          </button>
+                          <button type="button" className="mini-button" disabled={last} onClick={() => moveQuestion(si, qi, 1)}
+                            aria-label={`Move question ${number} down`} title="Move down">
+                            <ArrowDown size={14} />
+                          </button>
+                          <button type="button" className="mini-button danger" disabled={total <= QUESTION_LIMITS.min}
+                            onClick={() => change((sections) => sections[si].questions.splice(qi, 1))}
+                            aria-label={`Remove question ${number}`}
+                            title="Remove from the survey; its answers stay in Responses and Analytics">
+                            <Trash2 size={14} />
+                          </button>
+                        </div>
+                      )}
+                    </div>
+                  </div>
+                </div>
+              );
+            })}
+          </div>
+          {adjustable && (
+            <button type="button" className="mini-button question-add" disabled={full}
+              onClick={() => change((sections) => sections[si].questions.push(blankQuestion()))}
+              title={full ? `The survey has the most questions allowed (${QUESTION_LIMITS.max}).` : "Add a question to this page"}>
+              <Plus size={14} /> Add question
+            </button>
+          )}
+        </section>
+      ))}
+      {adjustable && (
+        <button type="button" className="button secondary question-add-section" disabled={full}
+          onClick={() => change((sections) => sections.push({ id: null, name: "New section", questions: [blankQuestion()] }))}
+          title={full ? `The survey has the most questions allowed (${QUESTION_LIMITS.max}).` : "Add a page to the survey"}>
+          <Plus size={16} /> Add section
+        </button>
+      )}
     </form>
   );
 }
@@ -1635,7 +1781,7 @@ function AnalyticsPanel({ data, loaded, activities, activityFilter, onFilter }) 
           <header>
             <div>
               <h2>Score distribution</h2>
-              <p>Answers across the 15 survey questions</p>
+              <p>Answers across the survey questions</p>
             </div>
           </header>
           <div
@@ -1683,7 +1829,9 @@ function AnalyticsPanel({ data, loaded, activities, activityFilter, onFilter }) 
           <div className="question-bars">
             {data.questions.map((question, index) => (
               <div key={index}>
-                <span>Q{index + 1}</span>
+                <span title={question.text || undefined}>
+                  {question.retired ? "Earlier" : `Q${index + 1}`}
+                </span>
                 {question.type === "text" ? (
                   // Long-text questions have no score; 0.00 would read as a
                   // terrible rating rather than "not applicable".

@@ -18,6 +18,7 @@ import {
   submitFeedback,
   verifyCertificate,
 } from "../lib/api";
+import { answerFields, surveyPages } from "../lib/survey";
 import { Brand, TurnstileWidget } from "./shared";
 
 const emptyForm = {
@@ -98,7 +99,8 @@ export function PublicForm() {
   const [step, setStep] = useState(0),
     [form, setForm] = useState(emptyForm),
     [activities, setActivities] = useState([]),
-    [questions, setQuestions] = useState([]),
+    [survey, setSurvey] = useState(null),
+    // Answers by question key (its ID, or its position for Apps Script).
     [ratings, setRatings] = useState({}),
     [busy, setBusy] = useState(false),
     [done, setDone] = useState(null),
@@ -110,7 +112,7 @@ export function PublicForm() {
     Promise.all([getActivities(), getQuestions()])
       .then(([a, q]) => {
         setActivities(a);
-        setQuestions(q);
+        setSurvey(q);
         setLoaded(true);
       })
       .catch((loadError) =>
@@ -119,23 +121,29 @@ export function PublicForm() {
   }, []);
   const activity = activities.find((a) => a.id === form.activityId);
   const update = (key, value) => setForm((f) => ({ ...f, [key]: value }));
+  // One page per section that has questions, after "About you". The number
+  // of pages follows the survey: Apps Script's is always three.
+  const pages = survey ? surveyPages(survey) : [];
+  const lastStep = pages.length;
+  const page = step > 0 ? pages[step - 1] : null;
+  // Questions are numbered straight through the survey, not per page.
+  const firstNumber =
+    1 + pages.slice(0, Math.max(0, step - 1)).reduce((n, p) => n + p.questions.length, 0);
   // A rating answer is 1-5; a long-text answer is any non-blank string.
-  const answered = (i) => String(ratings[i] ?? "").trim() !== "";
+  const answered = (key) => String(ratings[key] ?? "").trim() !== "";
+  const setAnswer = (key, value) => setRatings((r) => ({ ...r, [key]: value }));
   const valid = useMemo(
     () =>
       step === 0
-        ? form.name.trim() &&
+        ? loaded &&
+          form.name.trim() &&
           /^\S+@\S+\.\S+$/.test(form.email) &&
           form.sex &&
           Number(form.age) >= 1 &&
           Number(form.age) <= 120 &&
           form.activityId
-        : step === 1
-          ? [0, 1, 2, 3, 4].every(answered)
-          : step === 2
-            ? [5, 6, 7, 8, 9].every(answered)
-            : [10, 11, 12, 13, 14].every(answered),
-    [step, form, ratings],
+        : Boolean(page?.questions.every((q) => answered(q.key))),
+    [step, form, ratings, loaded, page],
   );
   async function next() {
     setError("");
@@ -143,16 +151,15 @@ export function PublicForm() {
       setError("Please complete all required fields before continuing.");
       return;
     }
-    if (step < 3) return setStep((s) => s + 1);
+    if (step < lastStep) return setStep((s) => s + 1);
     if (!turnstileToken) {
       setError("Please complete the security verification before submitting.");
       return;
     }
     setBusy(true);
     try {
-      const answers = Object.fromEntries(
-        questions.map((_, i) => [`answer${i + 1}`, ratings[i]]),
-      );
+      // By question ID for the new backend, by position for Apps Script.
+      const answers = answerFields(survey, ratings);
       const res = await submitFeedback(
         {
           ...form,
@@ -233,11 +240,6 @@ export function PublicForm() {
         </div>
       </main>
     );
-  const groups = [
-    [0, 5],
-    [5, 10],
-    [10, 15],
-  ][Math.max(0, step - 1)];
   return (
     <div>
       <header className="topbar">
@@ -274,20 +276,13 @@ export function PublicForm() {
         </section>
         <section className="survey-card">
           <div className="step-header">
-            <span>Step {step + 1} of 4</span>
-            <strong>
-              {
-                [
-                  "About you",
-                  "Program content",
-                  "Event experience",
-                  "Overall reflection",
-                ][step]
-              }
-            </strong>
+            <span>
+              Step {step + 1} of {lastStep + 1}
+            </span>
+            <strong>{page ? page.name : "About you"}</strong>
           </div>
           <div className="progress">
-            <i style={{ width: `${(step + 1) * 25}%` }} />
+            <i style={{ width: `${((step + 1) / (lastStep + 1)) * 100}%` }} />
           </div>
           <div className="form-body">
             {step === 0 ? (
@@ -397,18 +392,9 @@ export function PublicForm() {
             ) : (
               <>
                 <div className="section-heading">
-                  <span>0{step + 1}</span>
+                  <span>{String(step + 1).padStart(2, "0")}</span>
                   <div>
-                    <h2>
-                      {
-                        [
-                          "",
-                          "Program content",
-                          "Event experience",
-                          "Overall reflection",
-                        ][step]
-                      }
-                    </h2>
+                    <h2>{page?.name}</h2>
                     <p>
                       Answer every question below before continuing.
                     </p>
@@ -416,39 +402,33 @@ export function PublicForm() {
                 </div>
                 {/* Match the type, don't exclude the others: a blacklist would
                     show the 1-5 legend for any future type added elsewhere. */}
-                {questions
-                  .slice(...groups)
-                  .some((q) => q.type === "rating") && <RatingLegend />}
-                {questions.slice(...groups).map((q, j) => {
-                  const idx = groups[0] + j;
+                {page?.questions.some((q) => q.type === "rating") && <RatingLegend />}
+                {page?.questions.map((q, j) => {
+                  const label = `${firstNumber + j}. ${q.text}`;
                   if (q.type === "text")
                     return (
-                      <label key={idx} className="question-text">
-                        {`${idx + 1}. ${q.text}`}
+                      <label key={q.key} className="question-text">
+                        {label}
                         <textarea
-                          value={ratings[idx] ?? ""}
+                          value={ratings[q.key] ?? ""}
                           maxLength={2000}
                           placeholder="Type your answer"
-                          onChange={(e) =>
-                            setRatings((r) => ({ ...r, [idx]: e.target.value }))
-                          }
+                          onChange={(e) => setAnswer(q.key, e.target.value)}
                         />
                       </label>
                     );
                   if (q.type === "yesno")
                     return (
-                      <fieldset key={idx} className="rating yesno">
-                        <legend>{`${idx + 1}. ${q.text}`}</legend>
+                      <fieldset key={q.key} className="rating yesno">
+                        <legend>{label}</legend>
                         <div className="rating-options yesno-options">
                           {["Yes", "No"].map((choice) => (
                             <button
                               type="button"
                               key={choice}
-                              className={ratings[idx] === choice ? "selected" : ""}
-                              aria-pressed={ratings[idx] === choice}
-                              onClick={() =>
-                                setRatings((r) => ({ ...r, [idx]: choice }))
-                              }
+                              className={ratings[q.key] === choice ? "selected" : ""}
+                              aria-pressed={ratings[q.key] === choice}
+                              onClick={() => setAnswer(q.key, choice)}
                             >
                               <span>{choice}</span>
                             </button>
@@ -458,14 +438,14 @@ export function PublicForm() {
                     );
                   return (
                     <Rating
-                      key={idx}
-                      label={`${idx + 1}. ${q.text}`}
-                      value={ratings[idx]}
-                      onChange={(v) => setRatings((r) => ({ ...r, [idx]: v }))}
+                      key={q.key}
+                      label={label}
+                      value={ratings[q.key]}
+                      onChange={(v) => setAnswer(q.key, v)}
                     />
                   );
                 })}
-                {step === 3 && (
+                {step === lastStep && (
                   <>
                     <label>
                       What was your most valuable takeaway?
@@ -507,21 +487,21 @@ export function PublicForm() {
             </button>
             <button
               className="button primary"
-              disabled={busy || (step === 3 && !turnstileToken)}
+              disabled={busy || (step === lastStep && !turnstileToken)}
               onClick={next}
               title={
-                step === 3
+                step === lastStep
                   ? "Submit your feedback for certificate processing"
                   : "Continue to the next survey step"
               }
             >
               {busy
                 ? "Submitting…"
-                : step === 3
+                : step === lastStep
                   ? "Submit feedback"
                   : "Continue"}{" "}
               {!busy &&
-                (step === 3 ? <Check size={18} /> : <ArrowRight size={18} />)}
+                (step === lastStep ? <Check size={18} /> : <ArrowRight size={18} />)}
             </button>
           </footer>
         </section>
