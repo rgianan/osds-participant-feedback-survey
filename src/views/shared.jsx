@@ -45,7 +45,7 @@ export function TurnstileWidget({ action, onToken, resetKey = 0 }) {
   if (!TURNSTILE_SITE_KEY)
     return (
       <div className="alert">
-        Turnstile is not configured. Add VITE_TURNSTILE_SITE_KEY in Netlify.
+        Turnstile is not configured. Add VITE_TURNSTILE_SITE_KEY to the site's environment variables, then deploy again.
       </div>
     );
   return <div className="turnstile-wrap" ref={container} />;

@@ -24,7 +24,7 @@ export async function adminUploadSignature(body, context) {
 
   const { gasUrl, proxyToken, workerToken } = context.appsScript || {};
   if (!gasUrl || !proxyToken || !workerToken)
-    throw new Error("Signature upload is not configured: set GAS_WEB_APP_URL, SUBMIT_SHARED_TOKEN and WORKER_TOKEN in Netlify.");
+    throw new Error("Signature upload is not configured: set GAS_WEB_APP_URL, SUBMIT_SHARED_TOKEN and WORKER_TOKEN in the site's environment variables.");
 
   let response;
   try {

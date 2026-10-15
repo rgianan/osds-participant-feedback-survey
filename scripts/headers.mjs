@@ -12,14 +12,32 @@
  *   node scripts/headers.mjs emit   → copy config/_headers to dist/_headers
  *   node scripts/headers.mjs clean  → delete dist/_headers before `netlify dev`
  */
-import { copyFileSync, existsSync, mkdirSync, rmSync } from "node:fs";
+import { copyFileSync, existsSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 
 const root = join(dirname(fileURLToPath(import.meta.url)), "..");
+const dist = process.env.HEADERS_DIST_DIR || join(root, "dist");
 const source = join(root, "config", "_headers");
-const target = join(root, "dist", "_headers");
+const target = join(dist, "_headers");
 const mode = process.argv[2];
+
+/**
+ * After a move to another host: REDIRECT_TO=https://<new address> on a
+ * Netlify site makes its deploy send every path to the same path there, for
+ * good. Issued certificates' QR codes keep their old address, so this is what
+ * keeps them verifying.
+ */
+function emitRedirect() {
+  const to = String(process.env.REDIRECT_TO || "").trim().replace(/\/+$/, "");
+  if (!to) return;
+  if (!/^https:\/\/[a-z0-9.-]+$/i.test(to)) {
+    console.error(`headers: REDIRECT_TO must be an https:// address with no path, not ${to}`);
+    process.exit(1);
+  }
+  writeFileSync(join(dist, "_redirects"), `/*  ${to}/:splat  301!\n`);
+  console.log(`headers: wrote dist/_redirects, sending every path to ${to}`);
+}
 
 // `netlify dev` serves dist/_headers even when it proxies to Vite, and it
 // re-reads the file, so a local `npm run build` mid-session would blank the
@@ -42,6 +60,7 @@ if (mode === "emit") {
     mkdirSync(dirname(target), { recursive: true });
     copyFileSync(source, target);
     console.log("headers: wrote dist/_headers");
+    emitRedirect();
   }
 } else if (mode === "clean") {
   rmSync(target, { force: true });

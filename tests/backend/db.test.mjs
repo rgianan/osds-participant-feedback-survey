@@ -69,3 +69,30 @@ test("a transaction that stops answering is abandoned the same way", async () =>
   assert.equal(made[0].ended, true);
   assert.equal(database().transaction((tx) => tx.query("select 1")) instanceof Promise, true);
 });
+
+test("queries asked for side by side take turns on the connection, so none is pipelined behind another", async () => {
+  let inFlight = 0;
+  let most = 0;
+  const order = [];
+  const client = {
+    unsafe(text) {
+      inFlight++;
+      most = Math.max(most, inFlight);
+      order.push(`start ${text}`);
+      return new Promise((resolve) => setTimeout(() => { inFlight--; order.push(`end ${text}`); resolve([{ text }]); }, 5));
+    },
+    begin(fn) { return fn({ unsafe: (text) => client.unsafe(text) }); },
+    end: () => Promise.resolve(),
+  };
+  const database = connectionKeeper({ connect: () => client });
+  const db = database();
+  // The dashboard's shape: two reads at once, and a transaction alongside.
+  const [a, b, c] = await Promise.all([
+    db.query("activities"),
+    db.query("count"),
+    db.transaction(async (tx) => [await tx.query("insert"), await tx.query("update")]),
+  ]);
+  assert.deepEqual([a, b, c.flat()], [[{ text: "activities" }], [{ text: "count" }], [{ text: "insert" }, { text: "update" }]]);
+  assert.equal(most, 1, "never two at once");
+  assert.deepEqual(order, ["start activities", "end activities", "start count", "end count", "start insert", "end insert", "start update", "end update"]);
+});

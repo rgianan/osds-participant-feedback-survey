@@ -73,6 +73,6 @@ test("an upload with Netlify's Apps Script settings missing says which are neede
   const reply = await call("adminUploadSignature", { payload: { filename: "s.png", mimeType: "image/png", base64: "iVBORw0K" } });
   assert.deepEqual(reply, {
     ok: false,
-    error: "Signature upload is not configured: set GAS_WEB_APP_URL, SUBMIT_SHARED_TOKEN and WORKER_TOKEN in Netlify.",
+    error: "Signature upload is not configured: set GAS_WEB_APP_URL, SUBMIT_SHARED_TOKEN and WORKER_TOKEN in the site's environment variables.",
   });
 });

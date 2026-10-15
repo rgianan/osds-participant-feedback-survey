@@ -17,8 +17,9 @@ import postgres from "postgres";
  */
 export const DATABASE_TIMEOUT = "The database did not answer in time (timeout). Please try again.";
 
-export function adaptPostgres(sql, { limitMs = 0, onTimeout = () => {} } = {}) {
-  const limited = (promise) => {
+export function adaptPostgres(sql, { limitMs = 0, onTimeout = () => {}, oneAtATime = false } = {}) {
+  const limited = (start) => {
+    const promise = start();
     if (!limitMs) return promise;
     promise.catch(() => {}); // if abandoned, its own failure later is expected and ignored
     let timer;
@@ -30,12 +31,24 @@ export function adaptPostgres(sql, { limitMs = 0, onTimeout = () => {} } = {}) {
     });
     return Promise.race([promise, expired]).finally(() => clearTimeout(timer));
   };
-  const wrap = (runner) => ({
-    query: (text, params = []) => limited(runner.unsafe(text, params)),
-  });
+  // With `oneAtATime`, a query or transaction starts only once the one before
+  // it has finished. Given a busy connection, postgres.js writes a second
+  // query without parameters down it at once (pipelining), and through
+  // Supavisor's transaction mode that second query's answer never came: the
+  // dashboard, which asks for two such things side by side, hung every time.
+  let tail = Promise.resolve();
+  const inTurn = (start) => {
+    if (!oneAtATime) return limited(start);
+    const run = tail.then(() => limited(start));
+    tail = run.then(() => {}, () => {});
+    return run;
+  };
+  // Inside a transaction the code already waits for each query, and they
+  // must not queue behind the transaction that holds their turn.
+  const inside = (tx) => ({ query: (text, params = []) => limited(() => tx.unsafe(text, params)) });
   return {
-    ...wrap(sql),
-    transaction: (fn) => limited(sql.begin((tx) => fn(wrap(tx)))),
+    query: (text, params = []) => inTurn(() => sql.unsafe(text, params)),
+    transaction: (fn) => inTurn(() => sql.begin((tx) => fn(inside(tx)))),
   };
 }
 
@@ -68,7 +81,7 @@ export function connectionKeeper({ connect, now = () => Date.now(), staleAfterMs
     if (db && now() - lastUsed > staleAfterMs) retire();
     if (!db) {
       sql = connect();
-      const adapted = adaptPostgres(sql, { limitMs, onTimeout: retire });
+      const adapted = adaptPostgres(sql, { limitMs, onTimeout: retire, oneAtATime: true });
       // Every use counts as activity, so a busy instance keeps its connection.
       const touch = (fn) => (...args) => {
         lastUsed = now();
@@ -108,6 +121,6 @@ const keeper = connectionKeeper({
 
 export function database() {
   if (!String(process.env.SUPABASE_DB_URL || "").trim())
-    throw new Error("The database is not configured. Set SUPABASE_DB_URL in Netlify.");
+    throw new Error("The database is not configured. Set SUPABASE_DB_URL in the site's environment variables.");
   return keeper();
 }

@@ -113,8 +113,8 @@ async function remote(action, payload = {}, attempt = 0) {
       const receivedHtml = /^\s*</.test(responseText);
       throw new Error(
         receivedHtml
-          ? "The backend returned a webpage instead of API data. Redeploy the current Netlify source and confirm GAS_WEB_APP_URL uses the Apps Script /exec URL."
-          : "The backend returned an invalid response. Check the Netlify gas-proxy function logs.",
+          ? "The backend returned a webpage instead of API data. Redeploy the site and confirm GAS_WEB_APP_URL uses the Apps Script /exec URL."
+          : "The backend returned an invalid response. Check the site's gas-proxy function logs.",
       );
     }
     if (!response.ok || data.ok === false)

@@ -85,7 +85,7 @@ export async function verifyPassword(password, salt, stored, pepper) {
   }
   if (stored.startsWith("v2:")) {
     if (!pepper)
-      throw new Error("Sign-in is not configured: set PASSWORD_PEPPER in Netlify to the value from Apps Script.");
+      throw new Error("Sign-in is not configured: set PASSWORD_PEPPER in the site's environment variables to the value from Apps Script.");
     const ok = constantTimeEquals(v2PasswordHash(password, salt, pepper), stored);
     return { ok, upgrade: ok };
   }

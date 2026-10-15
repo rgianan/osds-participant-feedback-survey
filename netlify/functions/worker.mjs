@@ -24,7 +24,7 @@ export const handler = async (event) => {
   if (event.httpMethod !== "POST") return json(405, { ok: false, error: "Method not allowed." });
   const expected = String(process.env.WORKER_TOKEN || "").trim();
   if (expected.length < 64)
-    return json(500, { ok: false, error: "WORKER_TOKEN is not set in Netlify. Copy it from Apps Script's setupWorkerToken()." });
+    return json(500, { ok: false, error: "WORKER_TOKEN is not set in the site's environment variables. Copy it from Apps Script's setupWorkerToken()." });
   const presented = String(event.headers?.authorization || "").replace(/^Bearer\s+/i, "").trim();
   if (!constantTimeEquals(presented, expected)) return json(401, { ok: false, error: "Forbidden: invalid worker token." });
 

@@ -84,10 +84,10 @@ test("a site that is half set up: each missing piece is named", async () => {
     SUPABASE_DB_URL: "", TURNSTILE_SECRET_KEY: "", WORKER_TOKEN: "w".repeat(96) });
   const results = await checkSite("https://staging.example.netlify.app/", { fetch, workerToken: "w".repeat(96) });
   assert.deepEqual(results.map((r) => [r.status, r.label, r.hint]), [
-    ["fail", "the proxy refuses requests", "The database is not configured. Set SUPABASE_DB_URL in Netlify."],
+    ["fail", "the proxy refuses requests", "The database is not configured. Set SUPABASE_DB_URL in the site's environment variables."],
     ["fail", "Turnstile", "Turnstile is not configured on the server."],
     ["pass", "worker endpoint up, and refuses requests without its token", undefined],
-    ["fail", "the worker endpoint cannot work", "The database is not configured. Set SUPABASE_DB_URL in Netlify."],
+    ["fail", "the worker endpoint cannot work", "The database is not configured. Set SUPABASE_DB_URL in the site's environment variables."],
   ]);
   const wrongToken = await checkSite("https://staging.example.netlify.app", { fetch, workerToken: "x".repeat(96) });
   assert.equal(wrongToken.at(-1).label, "WORKER_TOKEN does not match the site's");
@@ -154,6 +154,6 @@ test("the page must be built with a Turnstile site key: VITE_ variables are read
   const line = async (siteKey) => (await checkSite("https://staging.example.netlify.app", { fetch: page(siteKey) }))
     .find((r) => /site key/.test(r.label));
   assert.deepEqual(await line(""), { status: "fail", label: "the page was built without a Turnstile site key",
-    hint: "Set VITE_TURNSTILE_SITE_KEY (scope: Builds), then Deploys → Trigger deploy → Clear cache and deploy site." });
+    hint: "Set VITE_TURNSTILE_SITE_KEY for builds, then deploy again without the build cache (Netlify: Trigger deploy → Clear cache and deploy site; Vercel: Redeploy, build cache off)." });
   assert.equal((await line("0x4AAAAAAAexample-site-key")).status, "pass");
 });

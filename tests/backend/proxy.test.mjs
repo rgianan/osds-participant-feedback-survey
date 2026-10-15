@@ -54,7 +54,7 @@ test("BACKEND=supabase answers from the new backend and never calls Apps Script"
       assert.equal(reply.statusCode, 200);
       assert.deepEqual(JSON.parse(reply.body), {
         ok: false,
-        error: "The database is not configured. Set SUPABASE_DB_URL in Netlify.",
+        error: "The database is not configured. Set SUPABASE_DB_URL in the site's environment variables.",
       });
       assert.equal(fetched, false);
     } finally {

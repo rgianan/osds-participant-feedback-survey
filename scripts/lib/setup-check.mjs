@@ -228,7 +228,7 @@ export async function checkSite(site, { fetch = globalThis.fetch, workerToken = 
       results.push(/["'`][0-3]x[0-9A-Za-z_-]{20,}["'`]/.test(code)
         ? pass("the page was built with a Turnstile site key")
         : fail("the page was built without a Turnstile site key",
-          "Set VITE_TURNSTILE_SITE_KEY (scope: Builds), then Deploys → Trigger deploy → Clear cache and deploy site."));
+          "Set VITE_TURNSTILE_SITE_KEY for builds, then deploy again without the build cache (Netlify: Trigger deploy → Clear cache and deploy site; Vercel: Redeploy, build cache off)."));
     }
   } catch {}
 
@@ -251,7 +251,7 @@ export async function checkSite(site, { fetch = globalThis.fetch, workerToken = 
 
   const ping = await post("/.netlify/functions/worker", { action: "workerPing" }, { authorization: `Bearer ${workerToken}` });
   if (ping.status === 401) {
-    results.push(fail("WORKER_TOKEN does not match the site's", "Use the value setupWorkerToken() logged, in both Netlify and your shell."));
+    results.push(fail("WORKER_TOKEN does not match the site's", "Use the value setupWorkerToken() logged, in both the site's environment variables and your shell."));
     return results;
   }
   if (!ping.data?.ok) {
@@ -262,7 +262,7 @@ export async function checkSite(site, { fetch = globalThis.fetch, workerToken = 
   if (!database.reachable) results.push(fail("the site cannot reach the database", connectionHint(database.error, "portal_api")));
   else if (database.roundTripMs >= 50)
     results.push(warn(`database round trip from the site: ${database.roundTripMs} ms`,
-      "The functions and the database are far apart. Set Site configuration → Functions → Region to Singapore (Netlify Pro)."));
+      "The functions and the database are far apart. Run the functions in Singapore: on Vercel, vercel.json sets it; on Netlify, Site configuration → Functions → Region (Pro)."));
   else results.push(pass(`database round trip from the site: ${database.roundTripMs} ms`));
   if (!settings) {
     results.push(warn("the site runs older code", "Deploy the current code to see which settings it has."));

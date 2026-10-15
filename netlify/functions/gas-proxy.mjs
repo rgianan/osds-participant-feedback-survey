@@ -51,14 +51,14 @@ export const handler = async (event, context = {}) => {
     return json(500, {
       ok: false,
       error:
-        "The Apps Script backend is not configured. Set GAS_WEB_APP_URL in Netlify to the deployed /exec URL.",
+        "The Apps Script backend is not configured. Set GAS_WEB_APP_URL in the site's environment variables to the deployed /exec URL.",
     });
   const sharedToken = String(process.env.SUBMIT_SHARED_TOKEN || "").trim();
   if (sharedToken.length < 64)
     return json(500, {
       ok: false,
       error:
-        "The submit security token is not configured. Set SUBMIT_SHARED_TOKEN in Netlify.",
+        "The submit security token is not configured. Set SUBMIT_SHARED_TOKEN in the site's environment variables.",
     });
 
   const body = event.isBase64Encoded

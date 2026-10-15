@@ -58,7 +58,7 @@ const HANDLERS = {
   async workerClaimCertificateJobs(body, { db, portalBaseUrl }) {
     const base = trim(portalBaseUrl).replace(/\/+$/, "");
     if (!/^https?:\/\//.test(base))
-      throw new Error("PORTAL_BASE_URL is not set in Netlify, so certificates cannot carry a verification link.");
+      throw new Error("PORTAL_BASE_URL is not set in the site's environment variables, so certificates cannot carry a verification link.");
     const batchSize = Math.min(10, Math.max(1, parseInt(body?.batchSize, 10) || 10));
     const claimed = await db.query(
       `select claim_token::text as claim_token from portal.claim_certificate_jobs($1, $2::interval)`,
