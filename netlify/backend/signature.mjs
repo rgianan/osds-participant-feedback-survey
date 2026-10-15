@@ -1,4 +1,5 @@
 import { requireAdmin } from "./admin.mjs";
+import { APPS_SCRIPT_TIMEOUT, APPS_SCRIPT_WAIT_MS } from "./apps-script.mjs";
 
 /**
  * E-signature images go to the Drive folder the certificate templates live
@@ -25,19 +26,25 @@ export async function adminUploadSignature(body, context) {
   if (!gasUrl || !proxyToken || !workerToken)
     throw new Error("Signature upload is not configured: set GAS_WEB_APP_URL, SUBMIT_SHARED_TOKEN and WORKER_TOKEN in Netlify.");
 
-  const response = await (context.fetch || fetch)(gasUrl, {
-    method: "POST",
-    headers: { "content-type": "text/plain;charset=utf-8" },
-    body: JSON.stringify({
-      action: "workerUploadSignature",
-      proxyToken,
-      workerToken,
-      payload: { filename: String(file.filename), mimeType: String(file.mimeType), base64: String(file.base64) },
-      requestContext: { requestId: context.requestId || "" },
-    }),
-    redirect: "follow",
-    signal: AbortSignal.timeout(30_000),
-  });
+  let response;
+  try {
+    response = await (context.fetch || fetch)(gasUrl, {
+      method: "POST",
+      headers: { "content-type": "text/plain;charset=utf-8" },
+      body: JSON.stringify({
+        action: "workerUploadSignature",
+        proxyToken,
+        workerToken,
+        payload: { filename: String(file.filename), mimeType: String(file.mimeType), base64: String(file.base64) },
+        requestContext: { requestId: context.requestId || "" },
+      }),
+      redirect: "follow",
+      signal: AbortSignal.timeout(APPS_SCRIPT_WAIT_MS),
+    });
+  } catch (error) {
+    if (error?.name === "TimeoutError") throw new Error(APPS_SCRIPT_TIMEOUT);
+    throw error;
+  }
   let reply;
   try {
     reply = JSON.parse(await response.text());

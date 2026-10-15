@@ -99,6 +99,12 @@ export async function checkApiDatabase(url, db) {
   results.push(claim.capped ? pass("certificate attempt cap (second migration)")
     : fail("no certificate attempt cap", "Run supabase/migrations/20261014000000_worker_attempt_cap.sql in the SQL editor."));
 
+  const [limits] = await conn.query(
+    `select coalesce(array_to_string(rolconfig, ','), '') as config from pg_roles where rolname = current_user`);
+  const timed = ["lock_timeout", "statement_timeout", "idle_in_transaction_session_timeout"].every((name) => limits.config.includes(`${name}=`));
+  results.push(timed ? pass("time limits on portal_api's sessions (third migration)")
+    : fail("no time limits on portal_api's sessions", "Run supabase/migrations/20261015000000_api_time_limits.sql in the SQL editor."));
+
   const open = (await conn.query(
     `select c.relname::text as name from pg_class c join pg_namespace n on n.oid = c.relnamespace
       where n.nspname = 'portal' and c.relkind = 'r' and not c.relrowsecurity`)).map((t) => t.name);

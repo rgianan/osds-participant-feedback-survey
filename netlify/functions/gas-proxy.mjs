@@ -1,4 +1,5 @@
 import { createHash } from "node:crypto";
+import { APPS_SCRIPT_TIMEOUT, APPS_SCRIPT_WAIT_MS } from "../backend/apps-script.mjs";
 
 /**
  * Maintenance mode for the Supabase cutover and a rollback: with
@@ -15,6 +16,14 @@ const READ_ONLY_ACTIONS = new Set([
 ]);
 export const MAINTENANCE_MESSAGE =
   "The portal is being upgraded and will be back shortly. Please try again in a few minutes.";
+/**
+ * One line per request in Netlify's function log: the action, how long it
+ * took and how it ended. Never the request's contents.
+ */
+function logRequest(action, startedAt, outcome) {
+  console.log(JSON.stringify({ action: String(action ?? "").slice(0, 60), ms: Date.now() - startedAt, ...outcome }));
+}
+
 const inMaintenance = () =>
   ["on", "true", "1", "yes"].includes(String(process.env.MAINTENANCE_MODE || "").trim().toLowerCase());
 
@@ -30,6 +39,8 @@ const json = (statusCode, payload) => ({
 });
 
 export const handler = async (event, context = {}) => {
+  const startedAt = Date.now();
+  let action = "";
   if (event.httpMethod !== "POST")
     return json(405, { ok: false, error: "Method not allowed." });
 
@@ -60,6 +71,7 @@ export const handler = async (event, context = {}) => {
     const payload = JSON.parse(body);
     if (!payload || typeof payload !== "object" || Array.isArray(payload))
       return json(400, { ok: false, error: "Invalid JSON request." });
+    action = payload.action;
     if (inMaintenance() && !READ_ONLY_ACTIONS.has(payload.action))
       return json(503, { ok: false, error: MAINTENANCE_MESSAGE, maintenance: true });
     const portalBaseUrl = String(
@@ -130,10 +142,9 @@ export const handler = async (event, context = {}) => {
     // on that path, so the Apps Script path below never imports it.
     if (String(process.env.BACKEND || "").trim().toLowerCase() === "supabase") {
       const { handleSupabaseRequest } = await import("../backend/index.mjs");
-      return json(
-        200,
-        await handleSupabaseRequest(payload, { requestId, portalBaseUrl }),
-      );
+      const reply = await handleSupabaseRequest(payload, { requestId, portalBaseUrl });
+      logRequest(action, startedAt, reply.ok ? { backend: "supabase", ok: true } : { backend: "supabase", ok: false, error: String(reply.error).slice(0, 200) });
+      return json(200, reply);
     }
     payload.proxyToken = sharedToken;
     payload.portalBaseUrl = portalBaseUrl;
@@ -143,9 +154,10 @@ export const handler = async (event, context = {}) => {
       headers: { "content-type": "text/plain;charset=utf-8" },
       body: JSON.stringify(payload),
       redirect: "follow",
-      signal: AbortSignal.timeout(30_000),
+      signal: AbortSignal.timeout(APPS_SCRIPT_WAIT_MS),
     });
     const responseText = await upstream.text();
+    logRequest(action, startedAt, { backend: "apps-script", status: upstream.status });
     try {
       JSON.parse(responseText);
     } catch {
@@ -164,9 +176,11 @@ export const handler = async (event, context = {}) => {
       body: responseText,
     };
   } catch (error) {
-    return json(502, {
+    const timedOut = error?.name === "TimeoutError";
+    logRequest(action, startedAt, { ok: false, error: timedOut ? "timeout" : String(error?.message || error).slice(0, 200) });
+    return json(timedOut ? 504 : 502, {
       ok: false,
-      error: `Unable to reach Apps Script: ${error.message || String(error)}`,
+      error: timedOut ? APPS_SCRIPT_TIMEOUT : `Unable to reach Apps Script: ${error.message || String(error)}`,
     });
   }
 };

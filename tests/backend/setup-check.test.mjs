@@ -23,6 +23,7 @@ test("the API database: a correct setup passes every check, signed in as portal_
     "pass signs in as portal_api",
     "pass all 10 tables",
     "pass certificate attempt cap (second migration)",
+    "pass time limits on portal_api's sessions (third migration)",
     "pass row-level security on every table",
     "pass audit log is append-only for portal_api",
     "info empty: ready for the import",
@@ -41,6 +42,7 @@ test("the API database: the wrong user and a missing migration are named, with w
     ["warn", "port 5432"],
     ["fail", "signs in as postgres"],
     ["fail", "no certificate attempt cap"],
+    ["fail", "no time limits on portal_api's sessions"],
     ["fail", "portal_api can delete audit entries"],
   ]);
   assert.match(failed[3].hint, /20261014000000_worker_attempt_cap\.sql/);

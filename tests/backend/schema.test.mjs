@@ -123,3 +123,9 @@ test("the worker claims pending and abandoned jobs, never live ones or ended act
   assert.equal((await db.query(`select * from portal.claim_certificate_jobs(10)`)).length, 0,
     "a second run straight after finds nothing to take");
 });
+
+test("portal_api's sessions give up instead of waiting until Netlify cuts the function off", async () => {
+  const { db } = await freshDatabase();
+  const [role] = await db.query(`select array_to_string(rolconfig, ',') as config from pg_roles where rolname = 'portal_api'`);
+  assert.equal(role.config, "lock_timeout=5s,statement_timeout=15s,idle_in_transaction_session_timeout=10s");
+});
