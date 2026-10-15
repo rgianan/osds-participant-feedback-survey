@@ -569,6 +569,11 @@ class ImportStopped extends Error {
 const CLEARED = ["answers", "responses", "questions", "survey_sections", "admin_sessions", "login_attempts", "activities", "admin_users",
   "audit_log", "settings"];
 
+// Rows travel as one JSON text parameter, cast `$1::text::json`, never
+// `$1::json`: postgres.js asks the server each parameter's type, and for a
+// json parameter it runs JSON.stringify on the value, so text that is already
+// JSON would arrive as one JSON string. As text, every driver sends it as is.
+
 /**
  * An empty database is filled. One that holds data is replaced only with
  * `replace`, and never silently loses what the sheets do not have: responses
@@ -584,9 +589,9 @@ async function prepareTarget(tx, converted, { replace, discardNewData }) {
     throw new ImportStopped("target", `The database already holds data (${listed}). To replace it with this export, run again with --replace.`);
   const [lost] = await tx.query(
     `select (select count(*) from portal.responses
-              where verification_code not in (select json_array_elements_text($1::json)))::int as responses,
+              where verification_code not in (select json_array_elements_text($1::text::json)))::int as responses,
             (select count(*) from portal.audit_log
-              where audit_id not in (select json_array_elements_text($2::json)))::int as audit`,
+              where audit_id not in (select json_array_elements_text($2::text::json)))::int as audit`,
     [JSON.stringify([...converted.inSheets.verificationCodes]), JSON.stringify([...converted.inSheets.auditIds])],
   );
   if ((lost.responses || lost.audit) && !discardNewData)
@@ -609,7 +614,7 @@ async function load(tx, tables) {
       await tx.query(
         `insert into portal.answers (response_id, question_id, value)
          select r.id, a.question_id, a.value
-           from json_to_recordset($1::json) as a(legacy_sheet_row integer, question_id uuid, value text)
+           from json_to_recordset($1::text::json) as a(legacy_sheet_row integer, question_id uuid, value text)
            join portal.responses r on r.legacy_sheet_row = a.legacy_sheet_row`,
         [JSON.stringify(rows)],
       );
@@ -619,7 +624,7 @@ async function load(tx, tables) {
     // In the export's order: responses and the audit log are numbered as they arrive.
     await tx.query(
       `insert into portal.${spec.table} (${columns})
-       select ${columns} from json_populate_recordset(null::portal.${spec.table}, $1::json) with ordinality as source
+       select ${columns} from json_populate_recordset(null::portal.${spec.table}, $1::text::json) with ordinality as source
         order by source.ordinality`,
       [JSON.stringify(rows)],
     );

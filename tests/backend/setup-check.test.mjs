@@ -137,3 +137,21 @@ test("a site can be given by any of its pages", async () => {
   await checkSite("https://ched-feedback-survey.netlify.app/admin", { fetch });
   assert.equal(seen[0], "https://ched-feedback-survey.netlify.app/.netlify/functions/gas-proxy");
 });
+
+test("the page must be built with a Turnstile site key: VITE_ variables are read only at build time", async () => {
+  const page = (siteKey) => async (url, init) => {
+    if (url.endsWith("/")) return new Response('<html><script type="module" crossorigin src="/assets/index-abc.js"></script></html>');
+    if (url.endsWith("/assets/index-abc.js")) return new Response(`const k=${JSON.stringify(siteKey)};render(k||"")`);
+    if (url.endsWith("/gas-proxy")) {
+      const body = JSON.parse(init.body);
+      return new Response(JSON.stringify(body.action === "submitFeedback" ? { ok: false, error: "Please complete the security verification." }
+        : { ok: true, data: { sections: [] } }), { status: 200 });
+    }
+    return new Response(JSON.stringify({ ok: false, error: "Forbidden: invalid worker token." }), { status: 401 });
+  };
+  const line = async (siteKey) => (await checkSite("https://staging.example.netlify.app", { fetch: page(siteKey) }))
+    .find((r) => /site key/.test(r.label));
+  assert.deepEqual(await line(""), { status: "fail", label: "the page was built without a Turnstile site key",
+    hint: "Set VITE_TURNSTILE_SITE_KEY (scope: Builds), then Deploys → Trigger deploy → Clear cache and deploy site." });
+  assert.equal((await line("0x4AAAAAAAexample-site-key")).status, "pass");
+});

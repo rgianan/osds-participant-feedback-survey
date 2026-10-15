@@ -16,7 +16,8 @@
  *                        entries made through the new backend, which the sheets
  *                        do not have (a staging rehearsal's tests)
  *
- * Environment (set in your shell for the run; never commit them):
+ * Environment (run in a terminal, the script asks for what is not set, without
+ * showing it; never put these on a command line or commit them):
  *   AUDIT_HASH_SECRET  the audit log's key, from Apps Script's Script Properties
  *   IMPORT_DB_URL      not needed for --dry-run. The database OWNER's connection
  *                      string: Supabase → Connect → Session pooler, user
@@ -27,7 +28,9 @@
  */
 import { readFileSync } from "node:fs";
 import { basename } from "node:path";
+import { ask } from "./lib/ask.mjs";
 import { importSheets, minuteStamp } from "./lib/import.mjs";
+import { describeDatabaseUrl } from "./lib/setup-check.mjs";
 
 const args = process.argv.slice(2);
 const flags = new Set(args.filter((a) => a.startsWith("--")));
@@ -42,10 +45,20 @@ if (unknown.length) fail(`Unknown option ${unknown.join(", ")}. Options: ${known
 if (files.length !== 1) fail("Usage: npm run import:sheets -- <export.json> [--dry-run] [--skip-responses] [--replace] [--discard-new-data]");
 if (flags.has("--discard-new-data") && !flags.has("--replace")) fail("--discard-new-data only applies with --replace.");
 const dryRun = flags.has("--dry-run");
-const auditSecret = String(process.env.AUDIT_HASH_SECRET || "").trim();
+// In a terminal, anything not set is asked for, hidden, so no secret is typed on a command line.
+const interactive = process.stdin.isTTY;
+let auditSecret = String(process.env.AUDIT_HASH_SECRET || "").trim();
+if (!auditSecret && interactive) auditSecret = await ask("AUDIT_HASH_SECRET, from Apps Script's Script Properties: ", true);
 if (!auditSecret) fail("Set AUDIT_HASH_SECRET to the value in Apps Script's Script Properties: the import checks the audit chain with it.");
-const url = String(process.env.IMPORT_DB_URL || "").trim();
+let url = String(process.env.IMPORT_DB_URL || "").trim();
+if (!dryRun && !url && interactive) url = await ask("The owner's connection string (IMPORT_DB_URL): ", true);
 if (!dryRun && !url) fail("Set IMPORT_DB_URL to the database owner's connection string, or run with --dry-run first.");
+// The two strings look alike; only the owner can replace the tables.
+const user = describeDatabaseUrl(url)?.user || "";
+if (!dryRun && !user.startsWith("postgres."))
+  fail(user.startsWith("portal_api.")
+    ? "That is the API's connection string (user portal_api). The import needs the owner's: Supabase → Connect → Session pooler, user postgres.<project-ref>, port 5432."
+    : "The owner's connection string must have the user postgres.<project-ref>: Supabase → Connect → Session pooler.");
 
 let exported;
 try {

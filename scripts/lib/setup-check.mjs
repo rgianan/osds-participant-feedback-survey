@@ -210,6 +210,22 @@ export async function checkSite(site, { fetch = globalThis.fetch, workerToken = 
     results.push(pass("Turnstile secret is set (its hostname list is checked only by a real submission: sign in once)"));
   else results.push(fail("Turnstile", turnstile.data?.error || `HTTP ${turnstile.status}`));
 
+  // The page itself. Vite bakes VITE_ variables in when the site is built, so
+  // a site key added after the last build is not in the page: the survey and
+  // sign-in show "Turnstile is not configured". Site keys are quoted strings
+  // like "0x4AAAAAAA…" in the page's script.
+  try {
+    const html = await (await fetch(`${base}/`)).text();
+    const script = html.match(/<script[^>]+src="([^"]+\.js)"/)?.[1];
+    if (script) {
+      const code = await (await fetch(new URL(script, `${base}/`).href)).text();
+      results.push(/["'`][0-3]x[0-9A-Za-z_-]{20,}["'`]/.test(code)
+        ? pass("the page was built with a Turnstile site key")
+        : fail("the page was built without a Turnstile site key",
+          "Set VITE_TURNSTILE_SITE_KEY (scope: Builds), then Deploys → Trigger deploy → Clear cache and deploy site."));
+    }
+  } catch {}
+
   // The worker endpoint: without a token it must refuse.
   const anonymous = await post("/.netlify/functions/worker", { action: "workerPing" });
   if (anonymous.status === 404 || !anonymous.data) {

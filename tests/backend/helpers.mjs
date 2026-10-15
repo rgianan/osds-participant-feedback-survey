@@ -20,6 +20,22 @@ export async function freshDatabase() {
   };
 }
 
+/**
+ * The database as postgres.js, the production driver, sends parameters to it.
+ * postgres.js asks the server each parameter's type, and runs JSON.stringify
+ * on any typed json or jsonb, so text already holding JSON arrives as one
+ * JSON string. PGlite sends text as is. Run through this, a query that only
+ * works on PGlite fails here as it would in production.
+ */
+export function asPostgresJs(db) {
+  const encode = (text, params) => {
+    const json = new Set([...text.matchAll(/\$(\d+)::jsonb?\b/g)].map((m) => Number(m[1]) - 1));
+    return params.map((value, i) => (json.has(i) && value !== null ? JSON.stringify(value) : value));
+  };
+  const wrap = (runner) => ({ query: (text, params = []) => runner.query(text, encode(text, params)) });
+  return { ...wrap(db), transaction: (fn) => db.transaction((tx) => fn(wrap(tx))) };
+}
+
 /** The survey as it is today: 15 questions in three sections. Returns question IDs in order. */
 export async function seedQuestions(db, count = 15, types = {}) {
   const sections = await db.query(

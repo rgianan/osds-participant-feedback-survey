@@ -9,7 +9,7 @@ import { handleAction } from "../../netlify/backend/actions.mjs";
 import { legacyPasswordHash, v2PasswordHash } from "../../netlify/backend/crypto.mjs";
 import { convertExport, importSheets } from "../../scripts/lib/import.mjs";
 import { AUDIT, AUDIT_SECRET, NOW, PROXY_TOKEN, RESPONSES, WORKER_TOKEN, appsScript } from "./contract-harness.mjs";
-import { freshDatabase } from "./helpers.mjs";
+import { asPostgresJs, freshDatabase } from "./helpers.mjs";
 import { exportFromAppsScript, manilaDate, setCell } from "./import-helpers.mjs";
 
 /**
@@ -269,6 +269,35 @@ test("the command line: a dry run checks everything and writes nothing; problems
     const noDatabase = await cli([good]);
     assert.equal(noDatabase.code, 2);
     assert.match(noDatabase.out, /Set IMPORT_DB_URL/);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("the import works with the production driver's way of sending JSON, replacing a database included", async () => {
+  const { db: pglite } = await freshDatabase();
+  const db = asPostgresJs(pglite);
+  // The stand-in is faithful: a bare ::json parameter fails exactly as it did against Supabase.
+  await assert.rejects(db.query(`select json_array_elements_text($1::json)`, ['["a"]']), /cannot call json_array_elements_text on a scalar/);
+  const { exported } = fixture();
+  assert.equal((await run(db, exported)).ok, true);
+  await pglite.query(`insert into portal.login_attempts (email_hash, attempts) values ('x', 1)`);
+  const replaced = await run(db, exported, { replace: true, discardNewData: true });
+  assert.equal(replaced.ok, true, JSON.stringify(replaced));
+  assert.deepEqual(replaced.replaced.discarded, { responses: 0, audit: 0 });
+});
+
+test("the command line refuses the API's connection string for an import", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "import-test-"));
+  try {
+    const file = join(dir, "export.json");
+    writeFileSync(file, JSON.stringify(fixture().exported));
+    const result = await promisify(execFile)(process.execPath, ["scripts/import-sheets.mjs", file], {
+      env: { PATH: process.env.PATH, AUDIT_HASH_SECRET: AUDIT_SECRET,
+        IMPORT_DB_URL: "postgresql://portal_api.abcdefgh:pw@aws-0-ap-southeast-1.pooler.supabase.com:6543/postgres" },
+    }).then(() => ({ code: 0 }), (error) => ({ code: error.code, out: error.stderr }));
+    assert.equal(result.code, 2);
+    assert.match(result.out, /That is the API's connection string \(user portal_api\)/);
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }

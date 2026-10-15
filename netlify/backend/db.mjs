@@ -24,7 +24,7 @@ export function adaptPostgres(sql) {
 let shared = null;
 
 /**
- * One small pool per function instance, reused while the instance stays warm.
+ * One connection per function instance, reused while the instance stays warm.
  *
  * SUPABASE_DB_URL must be the transaction pooler's address (port 6543) with
  * the portal_api role, e.g.
@@ -42,7 +42,14 @@ export function database() {
   shared = adaptPostgres(
     postgres(url, {
       prepare: false,
-      max: 3,
+      // One connection. A function instance serves one request at a time, so
+      // more only help queries a request runs side by side, and each extra one
+      // costs a full connection setup: TLS and sign-in, about five round trips.
+      // With the functions in the US and the database in Singapore that was
+      // 2 to 3 seconds each, enough to push a cold dashboard past Netlify's
+      // 10-second limit. (postgres.js cannot pipeline parameterized queries
+      // without prepared statements, so side-by-side queries queue here.)
+      max: 1,
       idle_timeout: 20,
       connect_timeout: 10,
       ssl: "require",

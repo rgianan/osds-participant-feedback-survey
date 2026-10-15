@@ -13,6 +13,7 @@
  * endpoint.
  */
 import { adaptPostgres } from "../netlify/backend/db.mjs";
+import { ask } from "./lib/ask.mjs";
 import { checkApiDatabase, checkOwnerDatabase, checkSite, describeDatabaseUrl } from "./lib/setup-check.mjs";
 
 const args = process.argv.slice(2);
@@ -22,24 +23,6 @@ const env = (name) => String(process.env[name] || "").trim();
 let apiUrl = env("SUPABASE_DB_URL");
 let ownerUrl = env("IMPORT_DB_URL");
 let workerToken = env("WORKER_TOKEN");
-
-/** One line from the terminal. `hidden`: what is typed or pasted is not shown, and never reaches shell history. */
-async function ask(question, hidden) {
-  const { createInterface } = await import("node:readline");
-  const { Writable } = await import("node:stream");
-  let muted = false;
-  const output = new Writable({ write(chunk, encoding, done) { if (!muted) process.stdout.write(chunk, encoding); done(); } });
-  const rl = createInterface({ input: process.stdin, output, terminal: true });
-  return new Promise((resolve) => {
-    rl.question(question, (answer) => {
-      rl.close();
-      // Nothing was shown, so say what arrived: a doubled paste shows as twice the length.
-      if (hidden) process.stdout.write(answer.trim() ? `  (received ${answer.trim().length} characters)\n` : "  (skipped)\n");
-      resolve(answer.trim());
-    });
-    muted = hidden;
-  });
-}
 
 if (!site && !apiUrl && !ownerUrl) {
   if (!process.stdin.isTTY) {

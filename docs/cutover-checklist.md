@@ -14,11 +14,13 @@ Secrets go into Netlify, Script Properties or your own shell for one command. Th
 | `MAINTENANCE_MODE=on` | Netlify environment | The proxy turns away anything that changes data (submissions, sign-ins, admin saves) with "The portal is being upgraded…". Reads still work, so certificate verification stays up. |
 | `BACKEND=supabase` | Netlify environment | The proxy answers from Postgres instead of Apps Script. Unset means Apps Script. |
 | `exportForMigration()` | Apps Script editor | Writes every sheet to one private JSON file in your Drive. |
-| `npm run import:sheets` | your computer | Loads that file in one transaction, checks it, and commits only if every check passes (`scripts/import-sheets.mjs`). |
+| `node scripts/import-sheets.mjs` | your computer | Loads that file in one transaction, checks it, and commits only if every check passes (`scripts/import-sheets.mjs`). |
 | `CERTIFICATE_SOURCE=api` | Script Properties | The one-minute certificate trigger takes its jobs from the new backend instead of the Responses sheet. |
 | `previewReplayFromNewBackend()`, `replayFromNewBackend()` | Apps Script editor | Rollback: copies everything done in the new backend since the import back into the sheets. |
 | `scripts/phase0-timings.js` | browser console on the site | Times every request. Target: median under 0.5 s. |
-| `npm run check:setup` | your computer | Checks the database, the owner's connection and a site, and says what to fix. Reads only, and never shows a secret. |
+| `node scripts/check-setup.mjs` | your computer | Checks the database, the owner's connection and a site, and says what to fix. Reads only, and never shows a secret. |
+
+Run both scripts with `node` in a terminal in this folder. They ask for every connection string and secret, and nothing you paste is shown or kept in your shell history. Paste each value once; the script then says how many characters it received. (`npm run …` works too, except in a PowerShell that blocks scripts.)
 
 Netlify reads environment variables when it deploys. After changing one: **Deploys → Trigger deploy → Deploy site**, then wait for "Published" (about 2 minutes).
 
@@ -31,9 +33,10 @@ Supabase (Pro, Singapore):
   - **Transaction pooler** (port 6543), user `portal_api.<project-ref>`: this is `SUPABASE_DB_URL` in Netlify.
   - **Session pooler** (port 5432), user `postgres.<project-ref>`: this is `IMPORT_DB_URL`, used only in your shell when you import.
 - [ ] Check it. Every line must show ✓ and the last must say "No problems found.":
-  ```bash
-  SUPABASE_DB_URL='…' IMPORT_DB_URL='…' npm run check:setup
+  ```powershell
+  node scripts/check-setup.mjs
   ```
+  Paste the two connection strings when asked, and press Enter to skip the site.
 
 Netlify:
 - [ ] Netlify Pro, with functions in the Singapore region (**Site configuration → Functions → Region**). Do the same for the staging site.
@@ -47,7 +50,11 @@ Netlify:
   | `AUDIT_HASH_SECRET` | production's, from Script Properties |
   | `PORTAL_BASE_URL` | the staging site's `https://` address |
   | `GAS_WEB_APP_URL`, `SUBMIT_SHARED_TOKEN`, `WORKER_TOKEN` | the spreadsheet copy's (below) |
-  | Turnstile keys | as production |
+  | `TURNSTILE_SECRET_KEY` | as production |
+  | `VITE_USE_NETLIFY_PROXY` | `true` |
+  | `VITE_TURNSTILE_SITE_KEY` | as production (it is public) |
+
+  The two `VITE_` variables are read when the site is built, so set them before its first deploy, or deploy again after.
 
 - [ ] In Cloudflare Turnstile, add the staging hostname to the widget's hostnames. Without it, every submission and sign-in fails the security check.
 - [ ] On the production site, add `SUPABASE_DB_URL`, `PASSWORD_PEPPER`, `AUDIT_HASH_SECRET` and `WORKER_TOKEN` now (production's own token, from `setupWorkerToken()` in production's script). Leave `BACKEND` unset. Nothing changes until it is set.
@@ -63,21 +70,23 @@ The copy holds real participants' details, and its script still writes to produc
 
 Set up the copy (about 15 minutes):
 - [ ] **File → Make a copy** of the spreadsheet. Its script comes with it. Its triggers do not.
-- [ ] In the copy's Apps Script editor, open **Project Settings → Script Properties**. Make sure `AUDIT_HASH_SECRET` and `PASSWORD_PEPPER` hold production's values; add them if they are missing.
-- [ ] Run `setupParticipantFeedbackSecurity()`. Put the token it returns into the staging site as `SUBMIT_SHARED_TOKEN`.
+- [ ] In the copy's Apps Script editor, open **Project Settings → Script Properties**. Make sure `AUDIT_HASH_SECRET` and `PASSWORD_PEPPER` hold production's values; add them if they are missing. Do this before the next step, which would otherwise invent a new audit secret.
+- [ ] Make sure `CERTIFICATE_QUEUE_TRIGGER_READY` is `1`, adding it if missing. Without it, the first submission the copy's script handles would create a certificate trigger on its own.
+- [ ] Run `rotateSubmitSharedTokenAndLog()`. Put the `submitSharedToken` it logs into the staging site as `SUBMIT_SHARED_TOKEN`. (It changes the copy's tokens only, never production's.)
 - [ ] Run `setupWorkerToken()`. Put the logged token into the staging site as `WORKER_TOKEN`.
 - [ ] Set the Script Property `WORKER_API_URL` to `https://<staging>/.netlify/functions/worker`.
 - [ ] **Deploy → New deployment → Web app** (Execute as me, Anyone). Put its `/exec` URL into the staging site as `GAS_WEB_APP_URL`.
 - [ ] Deploy the staging site.
 - [ ] Check it. This also confirms, from inside the site, that it reaches the database in a few milliseconds, which is the Singapore region at work:
-  ```bash
-  WORKER_TOKEN='…' npm run check:setup -- --site https://<staging>
+  ```powershell
+  node scripts/check-setup.mjs
   ```
-- [ ] Sign in once on the staging site. That proves the Turnstile hostname, which the check cannot see.
+  Skip the two connection strings, then give the staging address and its worker token.
+- [ ] Try signing in on the staging site, with any password. Its database stays empty until the rehearsal's import, so the sign-in cannot succeed yet. But "Invalid email or password." proves Turnstile accepts the staging hostname, which the check cannot see; "Security verification expired or failed" means the hostname is missing.
 
 Then run [Cutover](#cutover) on the copy and staging. Every "Apps Script" step means the copy's editor, and every "Netlify" step means the staging site. Skip "Staging off" and step 9: don't protect anything. Note the time each step took.
 
-Afterwards, run [Rollback](#rollback) the same way. Finish by checking that the copy's Responses sheet holds the rehearsal's test submissions and that `auditChainDiagnose()` says "Chain is intact."
+Afterwards, run [Rollback](#rollback) the same way. Finish by checking that the copy's Responses sheet holds the rehearsal's test submissions and that `auditChainDiagnose()` says "Chain is intact." Then delete the copy's `processCertificateQueue` trigger, and submit nothing more on staging.
 
 The rehearsal passes when:
 - the cutover runs start to finish in under 30 minutes;
@@ -90,7 +99,7 @@ Record the times and the timing results in the migration plan.
 
 The day before:
 - [ ] Run `exportForMigration()` and do a dry run (step 4, with `--dry-run`). It must end "Checks, all passed". If rows are listed, fix them in Sheets and repeat.
-- [ ] Check production, with production's worker token: `WORKER_TOKEN='…' npm run check:setup -- --site https://<site>`. It should answer from Apps Script, and every setting the new backend needs should already be present.
+- [ ] Check production: run `node scripts/check-setup.mjs` and give the production address and its worker token. It should answer from Apps Script, and every setting the new backend needs should already be present.
 - [ ] Have these open: Netlify environment variables, the Apps Script editor (**Executions** and **Triggers** pages), a terminal in this repository, and the password manager.
 
 On the day, about 25 minutes. First, **staging off** (2 min), so nothing but production can reach the database the import fills:
@@ -105,12 +114,12 @@ On the day, about 25 minutes. First, **staging off** (2 min), so nothing but pro
    - [ ] **Triggers**: delete the `processCertificateQueue` trigger.
 3. **Export** (2 min)
    - [ ] Run `exportForMigration()` and download the file it logs into this folder. It is git-ignored.
-4. **Import** (3 min). In the commands below, put in the exported file's name, `AUDIT_HASH_SECRET` from Script Properties, and the session pooler string from the password manager:
-   ```bash
-   AUDIT_HASH_SECRET='…' npm run import:sheets -- participant-feedback-export-….json --dry-run
+4. **Import** (3 min). Put in the exported file's name. Each command asks for `AUDIT_HASH_SECRET` (from Script Properties); the second also asks for the session pooler string (from the password manager):
+   ```powershell
+   node scripts/import-sheets.mjs participant-feedback-export-….json --dry-run
    ```
-   ```bash
-   AUDIT_HASH_SECRET='…' IMPORT_DB_URL='postgresql://postgres.<ref>:…@…:5432/postgres' npm run import:sheets -- participant-feedback-export-….json --replace --discard-new-data
+   ```powershell
+   node scripts/import-sheets.mjs participant-feedback-export-….json --replace --discard-new-data
    ```
    - [ ] Both end "Checks, all passed", and the second ends "Imported and committed."
    - [ ] Add `--skip-responses` only if every response in the sheet is a test.
